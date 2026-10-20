@@ -253,7 +253,7 @@ def _(games, mo, pl):
         mo.md("#### Valores faltantes por variable"),
         mo.ui.table(null_summary, pagination=False)
     ])
-    return
+    return null_summary, quality_stats
 
 
 @app.cell
@@ -385,7 +385,7 @@ def _(games, mo, movetext_character_lengths, movetext_length_summary, plt):
             movetext_figure,
         ]
     )
-    return
+    return movetext_summary
 
 
 @app.cell(hide_code=True)
@@ -550,8 +550,126 @@ def _(mo):
     return
 
 
-@app.cell
-def _():
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 6. Métodos de limpieza propuestos
+
+    Las siguientes propuestas corresponden a las variables y controles del
+    análisis. No se aplican cambios al dataset.
+
+    | Problema | Variables | Método de limpieza propuesto | Criterio |
+    |---|---|---|---|
+    | Títulos nulos | `WhiteTitle`, `BlackTitle` | Mostrar como **Sin título registrado**. | Conservar las partidas; no asumir que el jugador carece de título. |
+    | Ratings nulos | `WhiteElo`, `BlackElo` | Excluir del análisis de ratings. Para modelos que requieran datos completos, imputar la mediana por control de tiempo y marcar la imputación. | Calcular la mediana solo con datos de entrenamiento. |
+    | Cambios de rating nulos | `WhiteRatingDiff`, `BlackRatingDiff` | Mantener como desconocidos y excluir del análisis de cambios. | No sustituir por cero: cero significa que no hubo cambio. |
+    | Apertura o categorías nulas | `ECO`, `Opening`, `Event`, `Termination`, `TimeControl` | Recuperar de la fuente o etiquetar como **Desconocido**. | Evitar rellenar con la categoría más frecuente porque altera la distribución. |
+    | Campos esenciales nulos | `Site`, `Result`, `UTCDate`, `UTCTime` | Recuperar de la fuente; si no es posible, excluir únicamente del análisis que necesite ese campo. | No inventar identificadores, resultados ni fechas. |
+    | Notación nula | `movetext` | Recuperar el PGN o excluir de análisis de jugadas y longitud. | La partida puede conservarse para otros análisis. |
+    | Filas completamente duplicadas | Todas las columnas | Conservar una sola copia. | Confirmar que todos los campos coinciden. |
+    | URL repetida con datos diferentes | `Site` | Comparar los registros con la fuente y conservar la versión validada. | No eliminar automáticamente; no agrupar las URL nulas como una misma partida. |
+    | Ratings atípicos | `WhiteElo`, `BlackElo` | Marcar mediante IQR y revisar; conservar los extremos válidos. | Un rating fuera de los límites IQR no demuestra un error. |
+    | Cambios de rating atípicos | `WhiteRatingDiff`, `BlackRatingDiff` | Validar contra la fuente; corregir errores confirmados o convertirlos a nulos si no pueden recuperarse. | Los cambios extremos pueden ser reales; no eliminarlos solo por IQR. |
+    | Longitud atípica de notación | `movetext` | Validar la sintaxis PGN y revisar truncamientos o contenido incorrecto. | Conservar partidas largas válidas; no recortar por cantidad de caracteres. |
+
+    ### Conteos del análisis y tratamientos por variable
+
+    Ejecuta las secciones 3, 4 y 5 para obtener los conteos de nulos,
+    duplicados y valores atípicos en la tabla complementaria siguiente.
+
+    Los conteos son por variable y pueden corresponder a una misma partida,
+    por lo que no deben sumarse. Cuando el conteo es cero, el método queda
+    como regla preventiva. Tras aplicar una limpieza, compara las filas antes
+    y después, repite los controles de calidad y registra las correcciones
+    y exclusiones.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(iqr_summary, mo, movetext_summary, null_summary, pl, quality_stats):
+    cleaning_rows = []
+    for null_row in null_summary.to_dicts():
+        variable = null_row["Variable"]
+        if variable in ("WhiteTitle", "BlackTitle"):
+            treatment = (
+                "Conservar el nulo como título no registrado; para visualización, usar "
+                "'Sin título registrado'. No inferir que el jugador carece de título."
+            )
+        elif variable in ("WhiteElo", "BlackElo"):
+            treatment = (
+                "Conservar y marcar el faltante; excluir solo del análisis que requiere rating. "
+                "Si un modelo exige imputación, usar la mediana por control de tiempo "
+                "calculada en entrenamiento y añadir un indicador de imputación."
+            )
+        elif variable in ("WhiteRatingDiff", "BlackRatingDiff"):
+            treatment = (
+                "Conservar y marcar como cambio desconocido; excluir del análisis de cambios. "
+                "No rellenar con cero, porque cero representa un cambio observado."
+            )
+        elif variable in ("Site", "Result", "UTCDate", "UTCTime", "movetext"):
+            treatment = (
+                "Intentar recuperar de la fuente original; si no es posible, conservar "
+                "con una marca de calidad y excluir solo de los análisis que requieren "
+                "este campo. No inventar identificadores, resultados, fechas ni jugadas."
+            )
+        else:
+            treatment = (
+                "Conservar el faltante; usar 'Desconocido' en resúmenes categóricos. "
+                "Recuperar de la fuente cuando sea posible, sin sustituir por la moda."
+            )
+        cleaning_rows.append({
+            "Problema": "Nulos",
+            "Variable": variable,
+            "Resultado del análisis": f"{null_row['Nulos']:,} ({null_row['Nulos (%)']:.3f} %)",
+            "Método de limpieza propuesto": treatment,
+        })
+
+    cleaning_rows.append({
+        "Problema": "Duplicados por identificador",
+        "Variable": "Site",
+        "Resultado del análisis": (
+            f"{quality_stats['URLs_duplicadas'][0]:,} filas con URL repetida "
+            "(incluye todas las apariciones de cada grupo)"
+        ),
+        "Método de limpieza propuesto": (
+            "Revisar grupos de Site no nulo: si todas las columnas coinciden, conservar "
+            "una fila; si hay diferencias, contrastar con la fuente y resolver el conflicto "
+            "antes de eliminar. No deduplicar las URL nulas como si fueran una misma partida."
+        ),
+    })
+    for outlier_row in iqr_summary.to_dicts():
+        cleaning_rows.append({
+            "Problema": "Valores atípicos (IQR)",
+            "Variable": outlier_row["Variable"],
+            "Resultado del análisis": (
+                f"{outlier_row['Atípicos IQR']:,} ({outlier_row['Atípicos (%)']:.3f} %); "
+                f"límites: {outlier_row['Límite inferior']} a {outlier_row['Límite superior']}"
+            ),
+            "Método de limpieza propuesto": (
+                "Marcar los valores fuera de Q1 − 1.5 × IQR y Q3 + 1.5 × IQR; "
+                "validar contra la fuente y conservar los extremos reales. Corregir errores "
+                "confirmados o convertirlos a nulos si no son recuperables. Para modelos "
+                "sensibles, evaluar escalado robusto o winsorización en una copia, con "
+                "umbrales calculados solo en entrenamiento."
+            ),
+        })
+    length_metrics = dict(movetext_summary.iter_rows())
+    cleaning_rows.append({
+        "Problema": "Valores atípicos de longitud (IQR)",
+        "Variable": "movetext",
+        "Resultado del análisis": (
+            f"{length_metrics['Atípicos IQR']} ({length_metrics['Atípicos IQR (%)']} %); "
+            f"máximo: {length_metrics['Máximo (caracteres)']} caracteres"
+        ),
+        "Método de limpieza propuesto": (
+            "Revisar la sintaxis PGN y posibles truncamientos; conservar partidas largas "
+            "válidas. Si se necesita contar jugadas, analizar el PGN con un parser. "
+            "No recortar el texto por superar el umbral IQR."
+        ),
+    })
+    cleaning_methods = pl.DataFrame(cleaning_rows)
+    mo.ui.table(cleaning_methods, pagination=False)
     return
 
 

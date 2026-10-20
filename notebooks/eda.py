@@ -248,7 +248,11 @@ def _(games, mo, pl):
             ],
         }
     )
-    mo.vstack([quality_overview, mo.md("#### Valores faltantes por variable"), null_summary])
+    mo.vstack([
+        quality_overview,
+        mo.md("#### Valores faltantes por variable"),
+        mo.ui.table(null_summary, pagination=False)
+    ])
     return
 
 

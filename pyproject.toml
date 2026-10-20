@@ -1,7 +1,7 @@
 [project]
 name = "lichess-chess-games-big-data"
 version = "0.1.0"
-description = "Add your description here"
+description = "Lichess standard chess games: Big Data pipeline for per-move win probability"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -13,3 +13,24 @@ dependencies = [
     "pandas>=3.0.6",
     "polars>=2.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.uv.build-backend]
+module-name = "lichess_pipeline"
+
+[tool.ruff.lint.per-file-ignores]
+# marimo cells need explicit returns and bare display expressions.
+"notebooks/*.py" = ["PLR1711", "B018"]

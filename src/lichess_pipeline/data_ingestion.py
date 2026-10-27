@@ -6,7 +6,7 @@ or downloads it, selects columns and validates the schema. It never filters rows
 
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import polars as pl
@@ -16,6 +16,35 @@ from huggingface_hub.errors import HfHubHTTPError
 REPOSITORY_ID = "Lichess/standard-chess-games"
 REPOSITORY_REVISION = "de4e636eddf568a9394cc01fb0b9e1da04a6babf"
 REPOSITORY_REVISION_DATE = "2025-10-16"
+
+# Revisions below were read from `HfApi().dataset_info(repo).sha` on 2026-10-27.
+EVALUATIONS_REPO_ID = "Lichess/chess-position-evaluations"
+EVALUATIONS_REVISION = "8c5285259fdbf3218bf2582de9775dd1378f520b"
+EVALUATIONS_REVISION_DATE = "2026-10-27"
+EVALUATIONS_SCHEMA: dict[str, pl.DataType] = {
+    "fen": pl.String(),
+    "line": pl.String(),
+    "depth": pl.UInt8(),
+    "knodes": pl.Int32(),
+    "cp": pl.Int16(),
+    "mate": pl.Int8(),
+}
+
+PUZZLES_REPO_ID = "Lichess/chess-puzzles"
+PUZZLES_REVISION = "461725966ea46898ec6481372a6326de3281bfbd"
+PUZZLES_REVISION_DATE = "2026-10-27"
+PUZZLES_SCHEMA: dict[str, pl.DataType] = {
+    "PuzzleId": pl.String(),
+    "GameId": pl.String(),
+    "FEN": pl.String(),
+    "Moves": pl.String(),
+    "Rating": pl.UInt16(),
+    "RatingDeviation": pl.UInt16(),
+    "Popularity": pl.Int8(),
+    "NbPlays": pl.UInt32(),
+    "Themes": pl.List(pl.String()),
+    "OpeningTags": pl.List(pl.String()),
+}
 
 EXPECTED_SCHEMA: dict[str, pl.DataType] = {
     "Event": pl.String(),
@@ -192,17 +221,23 @@ def download_month(
     ]
 
 
-def validate_schema(schema: pl.Schema, columns: Sequence[str]) -> None:
-    """Raise ValueError listing missing columns and dtype mismatches."""
+def validate_schema(
+    schema: pl.Schema,
+    columns: Sequence[str],
+    expected_schema: Mapping[str, pl.DataType] | None = None,
+) -> None:
+    """Raise ValueError listing missing columns and dtype mismatches.
+
+    `expected_schema` defaults to the games schema.
+    """
+    expected = EXPECTED_SCHEMA if expected_schema is None else expected_schema
     missing: list[str] = []
     mismatched: list[str] = []
     for name in columns:
         if name not in schema:
             missing.append(name)
-        elif name in EXPECTED_SCHEMA and schema[name] != EXPECTED_SCHEMA[name]:
-            mismatched.append(
-                f"{name}: expected {EXPECTED_SCHEMA[name]}, got {schema[name]}"
-            )
+        elif name in expected and schema[name] != expected[name]:
+            mismatched.append(f"{name}: expected {expected[name]}, got {schema[name]}")
     if missing or mismatched:
         parts = []
         if missing:
@@ -210,6 +245,29 @@ def validate_schema(schema: pl.Schema, columns: Sequence[str]) -> None:
         if mismatched:
             parts.append(f"dtype mismatches: {mismatched}")
         raise ValueError("Schema validation failed; " + "; ".join(parts))
+
+
+def scan_hf_dataset(
+    repo_id: str,
+    files: Sequence[str],
+    revision: str,
+    columns: Sequence[str],
+    expected_schema: Mapping[str, pl.DataType],
+) -> pl.LazyFrame:
+    """Lazily scan repo files via hf:// URLs pinned to `revision`.
+
+    Validates the requested columns against `expected_schema` and returns only
+    those columns. Nothing is read until `collect`.
+    """
+    if not files:
+        raise ValueError("No files given.")
+    unknown = [c for c in columns if c not in expected_schema]
+    if unknown:
+        raise ValueError(f"Unknown columns requested: {unknown}")
+    urls = [f"hf://datasets/{repo_id}@{revision}/{f}" for f in files]
+    lazy = pl.scan_parquet(urls, hive_partitioning=False)
+    validate_schema(lazy.collect_schema(), columns, expected_schema)
+    return lazy.select(list(columns))
 
 
 def scan_month(

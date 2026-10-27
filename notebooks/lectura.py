@@ -162,8 +162,8 @@ def _(EXPECTED_SCHEMA, games, mo, pl, shard_paths, validation):
             validation,
             mo.md("### Esquema leído vs esperado"),
             schema_table,
-            mo.md("### Primeras 5 filas"),
-            games.head(5).collect(),
+            mo.md("### Primeras 10 filas"),
+            games.head(10).collect(),
         ]
     )
     return

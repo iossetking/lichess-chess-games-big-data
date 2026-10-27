@@ -1,4 +1,4 @@
-# From Photo to Best Move — Project Proposal
+# From Photo to Best Move - Project Proposal
 
 Shared project for **Big Data** and **Computer Vision**. It replaces the earlier
 objective in `docs/Proyecto Final.pdf` (predicting the game result with an
@@ -10,7 +10,7 @@ Build a system that receives a **photo of a chessboard**, recognizes the
 position, and predicts the **best move** for the side to move.
 
 ```
-Photo ──(Computer Vision)──► FEN ──(our move model)──► best move + evaluation
+Photo ──(Computer Vision)──► FEN ──► best move + evaluation
                                           ▲
    Big Data: ~1.1 B Stockfish evaluations (labels) + 4.94 TB of human games
 ```
@@ -156,14 +156,3 @@ rendering), `torch` + `torchvision` (models), `cairosvg` (SVG → PNG),
 `opencv-python-headless` (homography). All resolve for Python 3.14.
 Lc0 BT4 (via `onnxruntime`) and Maia-3 run in separate environments, only for
 comparison. Hardware: RTX 4060 Laptop, 8 GB VRAM.
-
-**Licenses**: python-chess is GPL-3.0, so a published repository should be
-GPL-3.0. Maia-3 is AGPL-3.0. Ultralytics YOLO is avoided.
-
-## 9. Open questions
-
-- Confirm the ChessReD dataset license on 4TU.ResearchData.
-- Confirm Maia-3 details and the Lc0 network license in their official repositories.
-- Measure real training throughput on the RTX 4060 (current estimate: 1–2 k
-  positions/s for the 25 M model, i.e. 7–15 h for 20–50 M positions).
-- Measure remote read speed for one full month before planning the full-history scan.

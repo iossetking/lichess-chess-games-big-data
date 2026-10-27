@@ -5,6 +5,7 @@ description = "Lichess standard chess games: Big Data pipeline for per-move win 
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "chess>=1.11.2",
     "datasets>=5.1.0",
     "duckdb>=1.5.6",
     "huggingface-hub>=2.2.0",

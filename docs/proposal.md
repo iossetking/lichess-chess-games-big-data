@@ -1,158 +1,131 @@
-# From Photo to Best Move - Project Proposal
+# From Photo to Best Move — Project Proposal
 
-Shared project for **Big Data** and **Computer Vision**. It replaces the earlier
-objective in `docs/Proyecto Final.pdf` (predicting the game result with an
-FT-Transformer).
+Shared project for **Big Data** and **Computer Vision**, replacing the earlier
+game-result prediction objective in `docs/Proyecto Final.pdf`.
 
 ## 1. Goal
 
-Build a system that receives a **photo of a chessboard**, recognizes the
-position, and predicts the **best move** for the side to move.
+Build a system that takes a chessboard photo, recognizes its position, and
+suggests the best move for the side to move:
 
-```
-Photo ──(Computer Vision)──► FEN ──► best move + evaluation
-                                          ▲
-   Big Data: ~1.1 B Stockfish evaluations (labels) + 4.94 TB of human games
+```text
+Photo → computer vision → FEN/position → move model → top moves + evaluation
 ```
 
-"Best move" means the move chosen by **Stockfish at high search depth**.
-Chess is not solved: only endgames with up to 7 pieces have exact answers
-(Syzygy tablebases). Our model learns to **imitate the engine without
-calculating variations**. It is not expected to beat Stockfish.
+This uses **two separate models**. The vision model recognizes the board; the
+move model predicts a move from the recognized position. The move model learns
+to imitate Stockfish from its existing evaluations; it does not calculate
+variations or aim to beat Stockfish.
 
-## 2. Data and what each dataset is for
+## 2. Data
 
-All Lichess datasets are CC0. They are **read remotely with Polars** (`hf://`)
-at a pinned revision, so nothing large is downloaded and results are
-reproducible. Reading is done by `src/lichess_pipeline/data_ingestion.py`.
+Lichess datasets are CC0 and read remotely with Polars (`hf://`) at pinned
+revisions. The reader is `src/lichess_pipeline/data_ingestion.py`.
 
-| Dataset | Size | What it gives us | Why we need it |
-|---|---|---|---|
-| `Lichess/chess-position-evaluations` | 44 GB, ~1.1 B rows | Positions (`fen`) with Stockfish's best lines (`line`), `depth`, `cp`, `mate` | It is the **answer key**: the best move for each position is already computed, so we do not have to run Stockfish ourselves |
-| `Lichess/chess-puzzles` | 0.9 GB, ~6 M puzzles | Positions with a known winning solution and a difficulty rating | An **independent exam** for the model, graded by difficulty |
-| `Lichess/standard-chess-games` | 4.94 TB, 153 monthly partitions (2013-01 to 2025-09) | Billions of real human games with ratings, clocks and, in part of them, engine evaluations per move | Measures **how humans play compared with the engine** at scale, and supplies **real positions** for testing and for rendering images |
-| ChessReD (Masouris & van Gemert, VISAPP 2024) | 10,800 phone photos | Real board photos with the piece on every square | Tests the vision system on **real photos**, not only synthetic ones. License to be confirmed |
-
-## 3. How we use the 4.94 TB games dataset
-
-The games dataset is too large to download or to replay move by move on a
-laptop. We use it in three ways, from cheapest to most expensive:
-
-1. **Full scan with column selection (all or many months).** Polars reads only
-   the columns we need (`movetext`, ratings, `TimeControl`, `Termination`,
-   `UTCDate`) and extracts the engine evaluation (`[%eval]`) and clock
-   (`[%clk]`) comments from `movetext` with vectorized string operations, with
-   no Python loops. From consecutive evaluations we get the **centipawn loss of
-   each human move**, aggregated by rating, time control, game phase and year.
-   *Why:* this is the Big Data part. It processes the whole history with a
-   streaming pipeline, and each month becomes a small summary table.
-2. **Sampled months for joins (e.g. one recent month).** For a sample of
-   games, we replay the moves with python-chess, get the FEN of every position
-   and join it with the evaluations dataset. *Why:* it tells us whether the
-   human move matched Stockfish's best move. Replaying is slow, so it is done
-   on a sample only.
-3. **Real-game test set and image source.** Positions taken from these games
-   (never seen in training) are used to test the move model and to render
-   synthetic board images. *Why:* real games contain positions that look like
-   what a user would photograph.
-
-Practical limits: reading the full 4.94 TB remotely depends on bandwidth (at
-about 500 Mbps it takes roughly a day of transfer). We start with one month per
-year (13 months), process month by month, and only scale up if time allows.
-Every month is saved as a compact summary, so the work can be resumed.
-
-## 4. Models
-
-| Role | Model | Why |
+| Dataset | What it provides | How we use it |
 |---|---|---|
-| Answer key | Stockfish labels already in the evaluations dataset | Ground truth without running an engine |
-| Strong pretrained reference | **Lc0 BT4** (Leela Chess Zero network), run through ONNX in a separate environment | Strongest public network that picks moves without search; shows how close our model gets |
-| Human-move contrast (optional) | **Maia-3** (23 M), successor of Maia-2 | Predicts what a *human* of a given rating would play; contrasts "best" vs "human". AGPL-3.0, to verify in the official repo |
-| Simple baselines | Random legal move; small MLP/CNN on the board | Show that the main model learns something non-trivial |
-| **Our model** | **Transformer encoder trained from scratch** | The main contribution of the project |
+| `Lichess/chess-position-evaluations` (~44 GB, 1.1B rows) | FENs, Stockfish lines, depth and scores | Labels for training and evaluating the move model |
+| `Lichess/chess-puzzles` (~0.9 GB, 6M puzzles) | Positions, solutions and difficulty | Independent move-model test set |
+| `Lichess/standard-chess-games` (4.94 TB, 153 monthly partitions) | Human games, ratings, clocks and some engine evaluations | Big Data analysis, sampled real positions and image sources |
+| ChessReD (10,800 phone photos) | Real board photos with piece labels | Real-photo vision evaluation; license must be confirmed |
 
-Discarded: DeepMind `searchless_chess` (JAX, 270 M parameters; used only as a
-literature reference), Allie (uses search), Ultralytics YOLO (AGPL-3.0).
+## 3. Games and position images
 
-### Our model's architecture
+The games collection is too large to download or replay in full on a laptop.
+We will:
 
-- **Input**: 64 square tokens (13 classes: 6 white pieces, 6 black pieces,
-  empty) with learned position embeddings, plus tokens for side to move,
-  castling rights and en passant square.
-- **Body**: Transformer encoder. Start with **6 layers, d_model 256, 8 heads
-  (~5 M parameters)**; scale to **8 layers, d_model 512, 16 heads (~25 M)** if
-  time allows. Fits in 8 GB of VRAM with mixed precision.
-- **Output**: a score for every from-square/to-square pair plus promotions,
-  with **illegal moves masked**, so the model always returns a legal move.
-- **Target**: not only the single best move. The alternative lines in the
-  evaluations dataset are converted to win probabilities and used as soft
-  targets, which carries more information than one answer.
-- **Training**: mixed precision, batch 512–1024, fixed seed, saved config and
-  checkpoints.
-- **Expected results**: DeepMind's 9 M-parameter model matches Stockfish's move
-  about 64 % of the time and solves about 89 % of puzzles. That is a realistic
-  ceiling for a model of our size.
+1. Scan selected months with Polars, reading only needed columns. Extract
+   `[%eval]` and `[%clk]` comments from `movetext` with vectorized operations,
+   then summarize centipawn loss by rating, time control, game phase and year.
+2. Replay a sample of games with python-chess to get each position's FEN and
+   compare human moves with Stockfish evaluations.
+3. Use held-out real-game positions to test the move model and render a
+   **selected sample** as labeled board images for vision training.
 
-## 5. Computer Vision: photo → FEN
+Start with one month per year (13 months), process month by month, and save
+compact summaries so work can resume. A full scan depends on bandwidth; at
+500 Mbps, transferring 4.94 TB would take roughly a day.
 
-Chosen approach, the best-documented one: **find the board, straighten it,
-classify each square**. A November 2025 study (CVChess) reports 98.9 %
-correct squares with this approach; reading the whole photo in one step gets
-only 15 % perfect boards on ChessReD.
+## 4. Best-move model
 
-1. **Synthetic images**: render positions with python-chess (SVG → PNG) using
-   permissively licensed Lichess piece sets (CC0: rhosgfx; CC BY 4.0:
-   kiwen-suwi, Firi; MIT: fantasy, spatial, celtic; Apache 2.0: chessnut), with
-   perspective, lighting, noise and blur. *Why:* unlimited images with exact
-   labels at no cost.
-2. **Board detection**: find the four corners (edges + Hough lines, or a
-   keypoint model) and apply a homography to get a top-down 8×8 grid.
-3. **Square classification**: small pretrained CNN (ResNet-18 or MobileNet)
-   fine-tuned on the 13 classes.
-4. **FEN assembly and correction**: detect board orientation and apply chess
-   rules (one king per side, no pawns on ranks 1 and 8) to fix doubtful squares.
-5. **Real photos**: fine-tune and test on ChessReD; final test on our own phone
-   photos.
-- **Metrics**: correct squares (%), boards with zero errors (%), mean errors
-  per board.
+| Role | Model |
+|---|---|
+| Training labels | Stockfish evaluations already in the Lichess dataset |
+| Main model | Transformer encoder trained from scratch on Stockfish-labeled positions |
+| Baselines | Random legal move and a small MLP/CNN |
+| Pretrained comparison | Lc0 BT4 via ONNX; optional Maia-3 for human-move comparison |
+
+The Transformer receives a board position—not an image—as 64 square tokens
+(12 piece types plus empty), with side-to-move, castling and en-passant
+information. Start with 6 layers, width 256 and 8 attention heads (~5M
+parameters); scale up only if time and hardware allow. Its output scores legal
+moves, including promotions. Stockfish's best line and alternatives provide
+the training targets. Use mixed precision, fixed seeds, saved configs and
+checkpoints.
+
+Evaluate top-1/top-3 agreement with Stockfish, centipawn loss and puzzle
+accuracy by difficulty. A published ~9M-parameter model's reported 64% move
+agreement and 89% puzzle success are reference points, not guaranteed results.
+Lc0 BT4 (and, optionally, Maia-3) is for comparison, not our training model.
+
+## 5. Computer vision: photo → position
+
+The core approach is to detect and straighten the board, then classify its
+squares:
+
+1. **Make training images:** render selected FENs as labeled board images with
+   licensed piece sets; add perspective, lighting, blur and noise.
+2. **Find the board:** detect its corners and use a homography to create a
+   top-down 8×8 grid.
+3. **Recognize pieces:** train a small CNN from scratch to classify each square
+   as one of 12 piece types or empty.
+4. **Build the position:** determine board orientation, assemble the FEN and
+   check chess rules (for example, one king per side and no pawns on the first
+   or eighth rank).
+5. **Test on real photos:** evaluate on ChessReD and our own phone photos.
+
+Measure square accuracy, the percentage of boards with no errors, and mean
+errors per board.
+
+### Optional side plan: fine-tuning a pretrained vision model
+
+If time allows, compare the from-scratch CNN with a pretrained ResNet-18 or
+MobileNet. **Fine-tuning means starting with a model that already learned**
+general visual patterns, replacing its output layer for the chess-square
+classes, and training it further on our labeled chess images. If labeled
+real-photo squares are available, use them for a final small adaptation and
+compare both models on photos they have not seen. This is an optional vision
+experiment; it does not change how the best-move Transformer is trained.
 
 ## 6. Project steps
 
-Each step has its own plan, tests and code review before moving on.
+| # | Step | Main output |
+|---|---|---|
+| 0 | Remote games reader (done) | Month selection and schema checks |
+| 1 | Explore evaluations, puzzles and games | Data-quality and sample-size report |
+| 2 | Prepare move labels | Valid FENs, moves, scores and 90/5/5 FEN-hash split; remove puzzle positions from training |
+| 3 | Process games by month | Human-move summaries and held-out real positions |
+| 4 | Build simple baselines | Random and MLP/CNN scores |
+| 5 | Train the Transformer from scratch | Checkpoint, config and metrics |
+| 6 | Evaluate move predictions | Test, puzzles, real positions and pretrained comparisons |
+| 7 | Analyze humans vs. engine | Results by rating, time control and year |
+| 8 | Train the vision classifier | CNN trained on rendered board images |
+| 9 | Test vision on real photos | ChessReD and our photos; fine-tuning is optional |
+| 10 | Build the demo | One photo → FEN → top-3 move suggestions |
+| 11 | Write course reports | Big Data and Computer Vision reports |
 
-| # | Step | Data | Output | Why |
-|---|---|---|---|---|
-| 0 | **Reading** (done) | Games dataset | Remote reader with month selection and schema checks | Read any month without downloading terabytes |
-| 1 | **Exploration (EDA)** of evaluations, puzzles and games | All three | Short report: depths, score ranges, puzzle difficulty, how many games carry `[%eval]` and `[%clk]` per month | Know the data before building on it; decide sample sizes |
-| 2 | **Label pipeline** | Evaluations + puzzles | Clean parquet: FEN, best move, alternatives with scores; train/val/test split (90/5/5) by FEN hash; **puzzle positions removed from training** | The model learns from correct answers and is never tested on positions it has seen |
-| 3 | **Games pipeline** (Big Data core) | 4.94 TB games, month by month | Per-month summaries: centipawn loss per move by rating, time control, phase and year; real-game test positions | Use the full dataset at scale with a streaming, resumable pipeline |
-| 4 | **Baselines** | Step 2 output | Scores for random move and MLP/CNN | Set the minimum bar |
-| 5 | **Train our Transformer** | Step 2 sample (20–50 M positions) | Trained model, metrics, config | Main model of the project |
-| 6 | **Model evaluation** | Test split, puzzles, real-game positions | Top-1/top-3 agreement with Stockfish, centipawn loss, puzzle accuracy by difficulty; comparison with Lc0 BT4 (and Maia-3) | Show how good the model is and where it fails |
-| 7 | **Human vs. engine analysis** | Steps 3 and 6 | Charts: how often humans of each rating find the best move, over time and by time control | Main Big Data finding |
-| 8 | **Vision: synthetic data and square classifier** | Positions from steps 2–3 rendered as images | Trained square classifier | Core of the Computer Vision project |
-| 9 | **Vision: board detection and real photos** | ChessReD + our photos | Photo → FEN system with accuracy on real photos | Make it work outside synthetic images |
-| 10 | **Integrated demo** | All models | marimo app: photo → FEN → top-3 moves vs Stockfish | One system for both courses |
-| 11 | **Reports** | Results of all steps | One report per course | Deliverables |
+Steps 2 and 3 can run in parallel; step 8 starts after step 2 provides FENs.
+The demo processes a photo; continuous video or camera tracking is out of
+scope.
 
-Steps 2 and 3 are independent and can run in parallel; step 8 can start once
-step 2 produces positions.
+## 7. Safeguards and environment
 
-## 7. Safeguards
-
-- **No leakage**: split by FEN hash (same position never in two sets); remove
-  puzzle positions from training; real-game test positions come from months not
-  used for training.
-- **Validation**: every FEN and every labeled move is checked as legal with
-  python-chess; minimum analysis depth (e.g. 20).
-- **Reproducibility**: pinned dataset revisions, fixed seeds, saved configs.
-- **Resumable processing**: work is done file by file / month by month, with
-  compact outputs saved after each one.
-
-## 8. Dependencies and environment
-
-New packages, added only when each step needs them: `chess` (rules, FEN,
-rendering), `torch` + `torchvision` (models), `cairosvg` (SVG → PNG),
-`opencv-python-headless` (homography). All resolve for Python 3.14.
-Lc0 BT4 (via `onnxruntime`) and Maia-3 run in separate environments, only for
-comparison. Hardware: RTX 4060 Laptop, 8 GB VRAM.
+- Prevent leakage: split by FEN hash, remove puzzle positions from training,
+  and hold out game months for real-position tests.
+- Validate FENs and moves with python-chess; require a minimum evaluation depth
+  (for example, 20).
+- Pin dataset revisions, fix seeds, and save configs and checkpoints. Save
+  monthly outputs for resumable processing.
+- Add dependencies as needed: `chess`, `torch`, `torchvision`, `cairosvg` and
+  `opencv-python-headless`. The project targets Python 3.14 and an RTX 4060
+  Laptop with 8 GB VRAM. Run Lc0/Maia comparisons in separate environments.

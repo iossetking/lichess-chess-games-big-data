@@ -8,7 +8,8 @@ jugada: el punto de integración para un modelo de clasificación de piezas est�
 en `classify_square`.
 
 Para entender el diseño, la geometría y el siguiente paso de entrenamiento,
-consulta el [documento técnico](docs/vision_tecnica_tablero.md).
+consulta el [documento técnico](docs/vision_tecnica_tablero.md) o descarga la
+[versión Word](docs/Documento_Tecnico_Vision_Tablero_Ajedrez.docx).
 
 ### Preparación física
 

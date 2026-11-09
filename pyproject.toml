@@ -11,6 +11,8 @@ dependencies = [
     "huggingface-hub>=2.2.0",
     "marimo>=0.25.2",
     "matplotlib>=3.11.2",
+    "numpy>=2.0",
+    "opencv-contrib-python>=4.11",
     "pandas>=3.0.6",
     "polars>=2.0.0",
 ]
@@ -26,11 +28,12 @@ requires = ["uv_build>=0.13,<0.14"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.uv.build-backend]
 module-name = "lichess_pipeline"
+module-root = "src"
 
 [tool.ruff.lint.per-file-ignores]
 # marimo cells need explicit returns and bare display expressions.

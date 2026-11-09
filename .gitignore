@@ -60,5 +60,7 @@ Thumbs.db
 superpowers/
 .superpowers/
 
-# Docs
-docs/
+# Docs: keep local/generated files out of Git, except the shared technical guide.
+/docs/*
+!/docs/vision_tecnica_tablero.md
+!/docs/Documento_Tecnico_Vision_Tablero_Ajedrez.docx

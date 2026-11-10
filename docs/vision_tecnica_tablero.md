@@ -2,14 +2,15 @@
 
 ## 1. Propósito y alcance
 
-Este componente convierte la imagen de una cámara en una representación
-geométrica estable de un tablero de ajedrez real. Localiza el tablero, corrige
-la perspectiva y obtiene las 64 casillas en coordenadas conocidas.
+Este componente convierte la imagen de una cámara en un FEN para un tablero de
+ajedrez real. Localiza automáticamente el tablero, corrige la perspectiva,
+identifica las piezas con YOLO y obtiene las 64 casillas en coordenadas
+conocidas.
 
-El entregable actual **no calcula la mejor jugada ni identifica aún las piezas
-reales**. Su objetivo es resolver la base de visión para que un clasificador de
-piezas, y posteriormente un motor como Stockfish, reciban información ordenada
-y consistente.
+El entregable actual entrega el FEN estabilizado a la red de predicción de
+jugadas del repositorio. Mantiene separado el problema geométrico (tablero) del
+de reconocimiento (piezas), lo cual permite sustituir o ajustar el checkpoint
+de YOLO sin cambiar la integración del predictor.
 
 El sistema entrega una imagen cenital del tablero y un mapeo de las 64 regiones
 desde `a8` hasta `h1`. Esto reduce el problema de reconocimiento de piezas de
@@ -31,8 +32,8 @@ siempre con la misma escala y orientación.
 Cámara en color
       │
       ▼
-Detección de 4 marcadores ArUco
-      │       (esquinas conocidas del tablero)
+OpenCV: 49 intersecciones internas del patrón 8 × 8
+      │       (o YOLO-seg de tablero como respaldo)
       ▼
 Transformación de perspectiva / homografía
       │
@@ -40,12 +41,29 @@ Transformación de perspectiva / homografía
 Tablero cenital cuadrado, por defecto 800 × 800 px
       │
       ▼
-64 recortes de 100 × 100 px: a8, b8, ..., h1
+YOLO de piezas: 12 clases + cajas delimitadoras
       │
-      └──► Futuro: clasificador de pieza → FEN → motor de ajedrez
+      ▼
+Centro de cada caja → casilla → FEN estable → predictor de jugadas
 ```
 
-## 3. Decisión de diseño: marcadores ArUco
+## 2.1 Qué checkpoint se necesita
+
+No existe un checkpoint YOLO oficial y universal para piezas de ajedrez. Los
+pesos genéricos de YOLO sólo conocen COCO y no reconocen peones, torres ni
+casillas. El script exige un checkpoint con las 12 clases con color, por
+ejemplo `w-pawn` hasta `b-king`; acepta las variantes `white_pawn` y
+`black_king`. `scripts/train_chess_piece_yolo.py` descarga un espejo combinado
+CC BY 4.0 con los splits YOLO y ajusta `yolo11n.pt` localmente. La
+generalización depende mucho de las piezas, el tablero y la iluminación, por
+lo que debe terminarse el ajuste con imágenes tomadas con la cámara final.
+
+La orientación y el estado histórico no son visibles en una foto. El sistema
+permite rotar el tablero y recibe turno, enroques y captura al paso como
+contexto de la partida. Sin esos campos, el resultado contiene la colocación de
+piezas, pero no necesariamente un FEN apto para predecir una jugada legal.
+
+## 3. Decisión de diseño anterior: marcadores ArUco
 
 ### Qué son
 
@@ -67,7 +85,7 @@ La orientación se define al ver el tablero desde el lado de las piezas blancas:
 la fila superior de la imagen rectificada corresponde a la octava fila (`8`) y
 la inferior a la primera (`1`).
 
-### Por qué se eligieron
+### Por qué se eligieron inicialmente
 
 - **No necesita un conjunto de entrenamiento para localizar el tablero.** Se
   puede demostrar inmediatamente, incluso con pocas fotos disponibles.
@@ -78,12 +96,13 @@ la inferior a la primera (`1`).
 - **Simplifica la segmentación.** Al conocer los cuatro vértices, las 64
   casillas ya no se detectan individualmente: se calculan.
 
-### Qué se sacrifica
+### Qué se sacrifica y por qué ya no son la ruta principal
 
-Los marcadores deben imprimirse y mantenerse visibles junto al tablero. Para
-una versión final sin marcadores se puede reemplazar esta etapa por un modelo
-de *keypoints* que prediga las cuatro esquinas del tablero, pero esa alternativa
-requiere imágenes etiquetadas y pruebas de generalización.
+Los marcadores deben imprimirse y mantenerse visibles junto al tablero. La ruta
+actual usa `cv2.findChessboardCornersSB` para detectar automáticamente las
+intersecciones 7 × 7 de la cuadrícula. Si las piezas, una mano o reflejos
+ocultan demasiado la cuadrícula, `--board-weights` permite aportar un YOLO de
+segmentación con una máscara de clase `board` o `chessboard`.
 
 ## 4. Geometría: de una cámara inclinada a una vista cenital
 
@@ -150,28 +169,29 @@ probable de probar:
 | --- | --- | --- |
 | `board_destination(size)` | Crea los 4 puntos de destino de la vista cenital. | Mantiene consistente la homografía. |
 | `square_regions(size)` | Devuelve las regiones de `a8` a `h1`. | Convierte el tablero rectificado en entradas para el clasificador. |
-| `marker_centers_by_corner(...)` | Calcula el centro de cada marcador y los ordena por ID. | Conserva la orientación semántica del tablero. |
-| `classify_square(square_image)` | Devuelve provisionalmente `("empty", 1.0)`. | Es el contrato donde se enchufará el modelo entrenado. |
+| `detect_board_corners(frame)` | Encuentra las 49 intersecciones internas con OpenCV. | Localiza el tablero sin marcadores. |
+| `detections_to_fen(...)` | Asigna el centro de cada caja YOLO a una casilla y emite FEN. | Es el contrato entre visión y el predictor de jugadas. |
+| `FenStabilizer` | Espera varios frames iguales antes de emitir una posición. | Evita FEN intermitentes por detecciones ruidosas. |
 
-La función temporal `classify_square` no afirma que no haya piezas: solo evita
-fingir resultados de IA antes de entrenar un modelo. Se reemplaza en la siguiente
-fase.
+Los ayudantes de ArUco y `classify_square` continúan en el módulo sólo para las
+demos de calibración heredadas.
 
-### `scripts/chessboard_camera_demo.py`
+### `scripts/live_chess_fen.py`
 
 Es la aplicación de cámara. Su ciclo es:
 
 1. Abrir la webcam seleccionada con `cv2.VideoCapture`.
 2. Leer un frame.
-3. Detectar los ArUco con `cv2.aruco.ArucoDetector`.
-4. Verificar que estén los IDs 10, 11, 12 y 13.
-5. Si están presentes, calcular la homografía y rectificar el tablero.
-6. Dibujar la cuadrícula y etiquetas para inspección humana.
-7. Recortar las 64 casillas y llamar a `classify_square`.
+3. Detectar automáticamente la cuadrícula interna 7 × 7; si falla, usar la
+   máscara del YOLO-seg opcional.
+4. Calcular la homografía y rectificar el tablero.
+5. Ejecutar YOLO de piezas sobre la imagen rectificada.
+6. Convertir sus cajas y clases a FEN, después de estabilizar varios frames.
+7. Si se configuró un checkpoint del predictor, pedir la mejor jugada legal.
 8. Repetir hasta pulsar `q` o `Esc`.
 
 Hay dos ventanas: `Camera` enseña lo que está observando la cámara y
-`Rectified board` enseña la salida geométrica que consumiría el clasificador.
+`Board + YOLO pieces` enseña las detecciones y la cuadrícula rectificada.
 
 ### `scripts/generate_aruco_markers.py`
 
@@ -183,7 +203,8 @@ píxeles cada uno y los guarda en `data/aruco_markers/`. Puede cambiarse con
 
 | Dependencia | Uso |
 | --- | --- |
-| `opencv-contrib-python` | Cámara, detección ArUco, homografía y ventanas. Se usa la variante *contrib* porque incluye `cv2.aruco`. |
+| `opencv-contrib-python` | Cámara, detección de cuadrícula, homografía y ventanas. |
+| `ultralytics` | Carga e inferencia de los pesos YOLO de piezas y, opcionalmente, de segmentación del tablero. |
 | `numpy` | Arreglos de coordenadas y de imágenes. |
 | `pytest` | Pruebas automáticas del mapeo geométrico. |
 | `uv` | Gestiona el entorno reproducible y el archivo `uv.lock`. |
@@ -194,43 +215,39 @@ Desde la raíz del repositorio:
 
 ```bash
 uv sync
-uv run python scripts/generate_aruco_markers.py
-uv run python scripts/chessboard_camera_demo.py
+uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt
 ```
 
 Si hay más de una cámara:
 
 ```bash
-uv run python scripts/chessboard_camera_demo.py --camera 1
+uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt --camera 1
 ```
 
 Antes de demostrar:
 
-1. Imprimir los cuatro PNG sin escalar de forma desigual.
-2. Pegarlos alrededor, no encima, de las cuatro esquinas del tablero.
-3. Verificar los IDs y el orden de la tabla anterior.
-4. Asegurar iluminación suficiente y que los cuatro marcadores aparezcan en la
-   imagen.
-5. Mostrar primero la ventana `Camera`; cuando detecte todo, explicar que la
-   segunda ventana es la imagen normalizada que se usa para IA.
+1. Montar la cámara de modo que se vean las cuatro esquinas y las líneas 8×8.
+2. Asegurar iluminación uniforme y poco reflejo.
+3. Usar pesos YOLO entrenados en piezas reales, no un modelo COCO genérico.
+4. Verificar que la cuadrícula rectificada tenga `a8` arriba a la izquierda;
+   pulsar `f` si la cámara está del lado de negras.
+5. Conservar turno, enroques y captura al paso desde el historial de la partida.
 
-## 8. Entrenamiento futuro para reconocer piezas
+## 8. Ajuste del detector YOLO de piezas
 
 ### Formulación recomendada
 
-No es necesario que el modelo encuentre un rey dentro de una escena completa.
-La geometría ya proporciona una imagen por casilla. Por eso se recomienda
-entrenar un **clasificador de 13 clases** sobre esos recortes:
+El detector recibe el tablero rectificado y devuelve una caja por pieza. Se
+recomienda entrenarlo con **12 clases** que incluyan tipo y color:
 
 ```text
-empty
-white_pawn, white_knight, white_bishop, white_rook, white_queen, white_king
-black_pawn, black_knight, black_bishop, black_rook, black_queen, black_king
+w-pawn, w-knight, w-bishop, w-rook, w-queen, w-king
+b-pawn, b-knight, b-bishop, b-rook, b-queen, b-king
 ```
 
-Esto se conoce como clasificación de imagen, no segmentación semántica. Cada
-ejemplo de entrenamiento es una casilla de tamaño fijo con una etiqueta. Es más
-sencillo que usar detección de objetos porque la posición ya se conoce.
+La salida son cajas delimitadoras y confianza. El centro de la caja determina
+la casilla después de rectificar; si dos cajas caen en la misma casilla, se
+conserva la de mayor confianza.
 
 ### Datos necesarios
 
@@ -250,42 +267,36 @@ quedar separados entre entrenamiento y validación.
 
 ### Entrenamiento y conexión
 
-Se puede usar un CNN pequeño propio, EfficientNet/MobileNet o el modo de
-clasificación de Ultralytics. El modelo debe devolver la clase con mayor
-probabilidad y su confianza. Luego se sustituye el cuerpo de
-`classify_square` por la carga del modelo y su inferencia.
-
-En cada frame el resultado debe ser un diccionario como:
+Se puede partir de `yolo11n.pt` y ajustar detección con Ultralytics, incluyendo
+variaciones de ángulo, escala, desenfoque e iluminación. El checkpoint debe
+devolver clase, confianza y caja. En cada frame la integración recibe objetos
+como:
 
 ```python
-{
-    "a8": ("black_rook", 0.99),
-    "e1": ("white_king", 0.98),
-    "e4": ("empty", 0.97),
-}
+PieceDetection("b-rook", 0.99, (5, 5, 95, 95))
+PieceDetection("w-king", 0.98, (410, 710, 490, 795))
 ```
 
-Con ese diccionario otro componente puede generar FEN y pedir una recomendación
-al motor. La visión no debe decidir legalidad de jugadas ni la mejor jugada;
-esa responsabilidad queda separada.
+`detections_to_fen` convierte esa lista en FEN. La visión no decide legalidad
+ni la mejor jugada; esa responsabilidad queda separada en el predictor.
 
-## 9. Alternativa sin marcadores y por qué no es la primera entrega
+## 9. Respaldo de segmentación para tableros difíciles
 
-En una versión sin ArUco, se etiqueta un conjunto de imágenes con las cuatro
-esquinas del tablero y se entrena un detector de *keypoints* (por ejemplo, un
-modelo YOLO de pose). La salida sigue siendo exactamente la misma: cuatro
-puntos ordenados para calcular una homografía.
+Cuando `findChessboardCornersSB` no puede ver suficiente cuadrícula por piezas,
+manos, reflejos o un tablero con líneas débiles, se etiqueta el contorno entero
+del tablero y se entrena un modelo YOLO de segmentación. La máscara se reduce
+a cuatro esquinas y la salida sigue siendo la misma homografía.
 
 Esto es útil si el proyecto exige detectar cualquier tablero sin accesorios,
 pero aumenta el riesgo técnico:
 
-| Aspecto | ArUco | Modelo de esquinas |
+| Aspecto | Cuadrícula OpenCV | Segmentación YOLO |
 | --- | --- | --- |
 | Datos etiquetados | No | Sí |
-| Tiempo para un MVP | Bajo | Medio/alto |
-| Tableros distintos | Requiere marcadores | Puede generalizar, si los datos bastan |
-| Fallas por piezas cubriendo líneas | Baja | Depende del entrenamiento |
-| Robustez inicial | Alta | Debe medirse |
+| Latencia | Muy baja | Mayor, por inferencia |
+| Tableros distintos | Depende del contraste | Puede generalizar, si los datos bastan |
+| Fallas por piezas cubriendo líneas | Posibles | Depende del entrenamiento |
+| Robustez inicial | Alta con rejilla visible | Debe medirse |
 
 Una alternativa clásica es detectar líneas del tablero con bordes/Hough o usar
 `findChessboardCorners`. No se tomó como solución primaria porque las piezas,
@@ -297,8 +308,8 @@ para patrones de calibración sin piezas encima.
 
 | Riesgo | Efecto | Mitigación |
 | --- | --- | --- |
-| Falta un marcador | No se rectifica el tablero. | Mostrar mensaje, recolocar cámara o marcador. |
-| Marcador demasiado pequeño/borroso | No se detecta con fiabilidad. | Imprimir grande, usar buena luz y evitar desenfoque. |
+| La cuadrícula queda oculta | No se rectifica el tablero. | Alejar la mano, mejorar la luz o usar `--board-weights`. |
+| Cuadrícula de poco contraste | No se detecta con fiabilidad. | Usar un tablero con contraste o entrenar segmentación. |
 | Reflejos o poca luz | Peor detección y clasificación. | Iluminación difusa y fijar exposición si la cámara lo permite. |
 | Lente gran angular | Líneas curvas; la homografía no compensa toda la distorsión. | Alejar la cámara o calibrarla y aplicar `undistort` antes. |
 | Mano sobre el tablero | El clasificador puede producir una posición transitoria falsa. | No aceptar una posición hasta que sea estable varios frames; opcionalmente detectar manos. |
@@ -313,8 +324,9 @@ Las pruebas en `tests/test_chess_vision.py` verifican que:
 2. existen exactamente 64 regiones;
 3. `a8` y `h1` se ubican donde corresponde;
 4. no se acepta un tamaño que no pueda dividirse entre ocho;
-5. los centros de ArUco conservan el orden explícito de sus IDs;
-6. no se intenta rectificar si falta alguno de los cuatro marcadores.
+5. las 49 intersecciones se extrapolan a cuatro esquinas;
+6. las etiquetas YOLO se normalizan y las cajas se convierten a FEN;
+7. el estabilizador publica sólo posiciones persistentes.
 
 Para ejecutarlas junto con el resto del proyecto:
 
@@ -322,14 +334,15 @@ Para ejecutarlas junto con el resto del proyecto:
 uv run python -m pytest -q
 ```
 
-En la implementación actual pasaron 38 pruebas.
+En la implementación actual pasaron 37 pruebas.
 
-## 13. Caso adicional: foto tomada con celular sin ArUco
+## 13. Opción adicional: calibración manual desde foto
 
-Una foto de celular normalmente no incluye los cuatro marcadores ArUco. Por
-eso la demo en vivo no puede rectificarla por sí sola: no hay referencias que
-identifiquen las esquinas. Para ese caso existe
-`scripts/chessboard_photo_demo.py`.
+Para una foto aislada se conserva `scripts/chessboard_photo_demo.py` como
+herramienta de calibración manual. La ruta en vivo no necesita ArUco: intenta
+la detección automática de la cuadrícula y puede usar segmentación YOLO como
+respaldo. Los cuatro clics son útiles para inspeccionar una imagen problemática
+o preparar datos de entrenamiento.
 
 El usuario carga la foto y hace clic en los cuatro vértices **internos** de la
 cuadrícula 8×8, en el orden `a8`, `h8`, `h1`, `a1`. No debe seleccionar el
@@ -341,11 +354,9 @@ un PNG rectificado con sus 64 regiones.
 uv run python scripts/chessboard_photo_demo.py --image /ruta/a/tablero.jpg
 ```
 
-El modo manual es deliberado: en fotos con piezas, reflejos y texturas no hay
-una detección automática de contorno que sea fiable para todos los tableros.
-Pedir cuatro clics elimina ese punto de fallo y permite validar de inmediato la
-segmentación. Si la orientación elegida es correcta, la imagen resultante tiene
-`a8` en la esquina superior izquierda y `h1` en la inferior derecha.
+El modo manual elimina el punto de fallo geométrico de una foto aislada. Si la
+orientación elegida es correcta, la imagen resultante tiene `a8` en la esquina
+superior izquierda y `h1` en la inferior derecha.
 
 El mismo método está disponible para la webcam con
 `uv run python scripts/chessboard_camera_demo.py --manual-corners`. Es útil al

@@ -2,8 +2,8 @@
 
 Dos modelos sobre datos oficiales de [Lichess](https://database.lichess.org/):
 
-1. **Visión**: detecta un tablero físico con cuatro marcadores ArUco, rectifica la
-   perspectiva y prepara las 64 casillas para clasificar las piezas.
+1. **Visión**: localiza automáticamente el tablero con la webcam, rectifica la
+   perspectiva y usa YOLO para identificar las 12 clases de piezas y emitir FEN.
 2. **Predicción de jugadas**: recibe una posición (FEN) y devuelve la mejor
    jugada en notación UCI.
 
@@ -60,7 +60,57 @@ completa requiere procesar por bloques hacia Parquet y un dataset de
 entrenamiento iterable que codifique el FEN y su máscara bajo demanda. La
 lógica de parseo y el contrato del modelo no cambian; solo la capa de E/S.
 
-## Demo de visión: tablero físico por webcam
+## Visión en vivo: cámara → tablero → piezas YOLO → FEN → jugada
+
+La ruta de producción es [`scripts/live_chess_fen.py`](scripts/live_chess_fen.py).
+No usa ArUco ni clics: OpenCV localiza automáticamente las 49 intersecciones
+internas del patrón 8×8 y calcula la homografía. Después un checkpoint YOLO
+entrenado para piezas se ejecuta sobre el tablero rectificado; cada centro de
+caja se asigna a una casilla y se construye el FEN.
+
+Instala la dependencia de inferencia y coloca unos pesos de YOLO con las 12
+clases coloreadas en `data/models/`:
+
+```bash
+uv add ultralytics
+uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt
+```
+
+Los nombres de clase aceptados incluyen `w-pawn`/`b-king`,
+`white_pawn`/`black_king` y variantes equivalentes. Un checkpoint COCO normal
+(`yolo*.pt`) **no sirve**, porque no conoce piezas de ajedrez. Un punto de
+partida público es el modelo/dataset [Chess Piece Detect de Roboflow Universe](https://universe.roboflow.com/chess-ynmuj/chess-piece-detect). El proyecto incluye un entrenador que descarga el espejo combinado [dopaul/chess-pieces-merged](https://huggingface.co/datasets/dopaul/chess-pieces-merged), CC BY 4.0, y guarda los pesos listos para usar:
+
+```bash
+uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
+```
+
+El comando exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
+mejor checkpoint a `data/models/chess-pieces.pt`. Para uso confiable, añade al
+ajuste fotos de tu cámara, piezas e iluminación.
+
+Al terminar los cuadernos de este repositorio, conecta directamente el modelo
+de jugadas:
+
+```bash
+uv run python scripts/live_chess_fen.py \
+  --weights data/models/chess-pieces.pt \
+  --move-model data/models/approach1_stage2_finetuned.pt \
+  --architecture scratch --turn w --castling KQkq
+```
+
+La ventana muestra el FEN y actualiza la sugerencia sólo cuando la posición se
+mantiene igual durante cuatro frames. `t` alterna el turno y `f` rota la
+orientación si la cámara está del lado de negras. `--board-weights` acepta de
+forma opcional un YOLO-seg que tenga una clase `board` o `chessboard`; se usa
+como respaldo cuando las líneas de la cuadrícula están demasiado ocultas.
+
+La imagen no puede saber quién tiene el turno, si una torre o rey ya se movió,
+ni la casilla de captura al paso. Para que el predictor sea correcto, conserva
+esos campos desde el historial de la partida con `--turn`, `--castling` y
+`--en-passant`; FEN no es sólo las piezas.
+
+## Demo heredada de calibración con ArUco
 
 Esta demo localiza un tablero con cuatro marcadores ArUco, corrige la
 perspectiva y superpone las 64 casillas. No intenta todavía calcular la mejor

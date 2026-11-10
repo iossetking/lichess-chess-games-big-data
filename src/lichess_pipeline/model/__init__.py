@@ -3,6 +3,7 @@
 from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
 from lichess_pipeline.model.scratch_net import (
     ChessPolicyNet,
+    evaluate_model,
     make_tensor_dataset,
     predict_top_moves,
     train_model,
@@ -11,6 +12,7 @@ from lichess_pipeline.model.scratch_net import (
 __all__ = [
     "ChessPolicyNet",
     "MaiaResidualPolicyNet",
+    "evaluate_model",
     "make_tensor_dataset",
     "predict_top_moves",
     "train_model",

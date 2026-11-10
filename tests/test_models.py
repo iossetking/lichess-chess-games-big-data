@@ -4,6 +4,7 @@ import polars as pl
 from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
 from lichess_pipeline.model.scratch_net import (
     ChessPolicyNet,
+    evaluate_model,
     make_tensor_dataset,
     predict_top_moves,
     train_model,
@@ -55,3 +56,18 @@ def test_two_stage_training_and_maia_adapter_run_on_mini_sample():
     maia_history = train_model(maia_model, dataset, dataset, epochs=1, lr=1e-3, batch_size=8)
     assert len(maia_history) == 1
     assert len(predict_top_moves(maia_model, chess.STARTING_FEN, top_k=3)) == 3
+
+
+def test_evaluate_model_reports_loss_and_top_k_accuracy():
+    sample_df = pl.DataFrame(
+        {
+            "fen": [chess.STARTING_FEN] * 4,
+            "move_uci": ["e2e4", "d2d4", "g1f3", "c2c4"],
+        }
+    )
+    dataset = make_tensor_dataset(sample_df, "fen", "move_uci")
+    model = ChessPolicyNet()
+    metrics = evaluate_model(model, dataset, batch_size=4)
+    assert set(metrics) == {"loss", "top1", "top3"}
+    assert metrics["top3"] >= metrics["top1"]
+    assert 0.0 <= metrics["top1"] <= 1.0

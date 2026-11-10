@@ -1,5 +1,61 @@
 # lichess-chess-games-big-data
 
+Dos modelos sobre datos oficiales de [Lichess](https://database.lichess.org/):
+
+1. **Visión**: detecta un tablero físico con cuatro marcadores ArUco, rectifica la
+   perspectiva y prepara las 64 casillas para clasificar las piezas.
+2. **Predicción de jugadas**: recibe una posición (FEN) y devuelve la mejor
+   jugada en notación UCI.
+
+La unión de ambos es: foto del tablero → FEN → jugada sugerida.
+
+## Requisitos
+
+```bash
+uv sync
+```
+
+## Cuadernos de datos y predicción (entrega parcial)
+
+Todo se lee directamente de `database.lichess.org`; no se necesita descargar un
+mes completo. Cada cuaderno cierra el flujo HTTP en cuanto reúne la muestra
+pedida y guarda sus resultados en `data/processed/` y `data/models/` (ignorados
+por git).
+
+| Cuaderno | Contenido | Salidas |
+|---|---|---|
+| `notebooks/01_eda_and_cleaning.py` | Exploración y limpieza de partidas `.pgn.zst` y evaluaciones `lichess_db_eval.jsonl.zst` | `games_clean_sample.parquet`, `positions_games_sample.parquet`, `evals_clean_sample.parquet` |
+| `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y ajustada con jugadas de Stockfish | `approach1_stage1_scratch.pt`, `approach1_stage2_finetuned.pt` |
+| `notebooks/03_model_maia_pretrained.py` | **Enfoque 3**: red residual estilo Maia, comparada con el enfoque 1 en la misma validación | `approach3_maia_finetuned.pt` |
+
+Ejecuta los cuadernos en orden:
+
+```bash
+uv run marimo edit notebooks/01_eda_and_cleaning.py
+uv run marimo edit notebooks/02_model_scratch_and_finetune.py
+uv run marimo edit notebooks/03_model_maia_pretrained.py
+```
+
+Los cuadernos 2 y 3 generan una muestra pequeña por su cuenta si los Parquet
+del cuaderno 1 todavía no existen.
+
+### Cómo funciona el modelo de jugadas
+
+- **Entrada**: una cadena FEN (incluye posición, turno, enroques y captura al
+  paso). No se usa una matriz suelta: el FEN ya transporta todo lo necesario.
+- **Codificación**: tensor `13 x 8 x 8` (6 planos de piezas blancas, 6 de negras
+  y 1 para el turno).
+- **Salida**: una de `64 x 64 = 4096` clases `origen -> destino`.
+- **Legalidad**: antes del `softmax` se enmascaran las jugadas ilegales con
+  `python-chess`, así que el modelo solo puede equivocarse de elección, nunca
+  proponer una jugada ilegal.
+- **Dos etapas**: primero aprende de jugadas humanas de Elo alto; después se
+  ajusta con las mejores jugadas de Stockfish. La tabla de resultados de cada
+  cuaderno compara Top-1 y Top-3 antes y después del ajuste.
+
+Para el servidor final solo cambian los tamaños de muestra: la misma lógica de
+lectura y entrenamiento escala al dataset completo de 2 TB.
+
 ## Demo de visión: tablero físico por webcam
 
 Esta demo localiza un tablero con cuatro marcadores ArUco, corrige la
@@ -27,7 +83,6 @@ abajo-izquierda. No tapes las esquinas del tablero con los marcadores.
 ### Ejecutar
 
 ```bash
-uv sync
 uv run python scripts/chessboard_camera_demo.py
 ```
 

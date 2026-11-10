@@ -105,6 +105,18 @@ def _evaluate(
     return total_loss / total, correct_top1 / total, correct_top3 / total
 
 
+def evaluate_model(
+    model: nn.Module,
+    dataset: TensorDataset,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict[str, float]:
+    """Score ``model`` on a dataset: legal-move loss plus Top-1/Top-3 accuracy."""
+    loss, top1, top3 = _evaluate(
+        model, _loader(dataset, batch_size, shuffle=False), nn.CrossEntropyLoss()
+    )
+    return {"loss": loss, "top1": top1, "top3": top3}
+
+
 def train_model(
     model: nn.Module,
     train_ds: TensorDataset,

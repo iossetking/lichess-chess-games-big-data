@@ -39,6 +39,20 @@ desde arriba con la cuadrícula `a8` a `h1`.
 uv run python scripts/chessboard_camera_demo.py --camera 1 --size 800
 ```
 
+### Foto tomada con celular sin marcadores ArUco
+
+La demo de webcam necesita los cuatro ArUco. Para una foto plana o inclinada
+tomada con celular, usa el selector manual:
+
+```bash
+uv run python scripts/chessboard_photo_demo.py --image /ruta/a/tablero.jpg
+```
+
+Haz clic en las esquinas **internas** de la cuadrícula 8×8 y en este orden:
+`a8`, `h8`, `h1`, `a1`. Pulsa Enter y se creará un PNG rectificado junto a la
+foto, con las 64 casillas sobrepuestas. Pulsa `r` para repetir la selección si
+el orden o las esquinas no quedaron bien.
+
 ### Siguiente iteración: reconocimiento de piezas
 
 Después de entrenar un clasificador con las clases `empty`, `white_pawn`, ...,

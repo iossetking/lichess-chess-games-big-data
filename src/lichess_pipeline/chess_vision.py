@@ -53,6 +53,34 @@ def marker_centers_by_corner(
     return np.asarray(centers, dtype=np.float32)
 
 
+def validate_ordered_board_corners(corners: np.ndarray) -> np.ndarray:
+    """Validate four convex board corners ordered TL, TR, BR, BL.
+
+    This is used by the still-image workflow, where a person clicks the board
+    corners instead of providing ArUco markers.  The explicit order preserves
+    the a8-to-h1 orientation after perspective correction.
+    """
+    points = np.asarray(corners, dtype=np.float32)
+    if points.shape != (4, 2) or not np.isfinite(points).all():
+        raise ValueError("Expected four finite 2D corner points")
+
+    edge_vectors = np.roll(points, -1, axis=0) - points
+    next_edge_vectors = np.roll(edge_vectors, -1, axis=0)
+    # 2D scalar cross product.  Writing it out avoids NumPy's 3D-only
+    # ``cross`` behavior in current releases.
+    turns = edge_vectors[:, 0] * next_edge_vectors[:, 1] - edge_vectors[:, 1] * next_edge_vectors[:, 0]
+    if np.any(np.isclose(turns, 0)) or not (np.all(turns > 0) or np.all(turns < 0)):
+        raise ValueError("Corners must form a convex quadrilateral in perimeter order")
+
+    signed_area = 0.5 * np.abs(
+        np.dot(points[:, 0], np.roll(points[:, 1], -1))
+        - np.dot(points[:, 1], np.roll(points[:, 0], -1))
+    )
+    if signed_area < 1:
+        raise ValueError("Board corner area is too small")
+    return points
+
+
 def classify_square(square_image: np.ndarray) -> tuple[str, float]:
     """Placeholder for the fine-tuned 13-class piece classifier.
 

@@ -53,6 +53,20 @@ Haz clic en las esquinas **internas** de la cuadrícula 8×8 y en este orden:
 foto, con las 64 casillas sobrepuestas. Pulsa `r` para repetir la selección si
 el orden o las esquinas no quedaron bien.
 
+### Webcam viendo una imagen en el iPhone sin ArUco
+
+Si estás mostrando una foto del tablero en la pantalla del iPhone frente a la
+webcam, usa el modo manual en vivo:
+
+```bash
+uv run python scripts/chessboard_camera_demo.py --manual-corners
+```
+
+Apunta la webcam al iPhone y pulsa `c`. Haz clic sobre la pantalla en las
+cuatro esquinas internas del tablero, en orden `a8`, `h8`, `h1`, `a1`, y pulsa
+Enter. La ventana `Rectified board` debe mostrar la cuadrícula 8×8. Mantén
+quietos el iPhone y la cámara; si los mueves, pulsa `c` otra vez para recalibrar.
+
 ### Siguiente iteración: reconocimiento de piezas
 
 Después de entrenar un clasificador con las clases `empty`, `white_pawn`, ...,

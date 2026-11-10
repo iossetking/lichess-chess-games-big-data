@@ -347,6 +347,13 @@ Pedir cuatro clics elimina ese punto de fallo y permite validar de inmediato la
 segmentación. Si la orientación elegida es correcta, la imagen resultante tiene
 `a8` en la esquina superior izquierda y `h1` en la inferior derecha.
 
+El mismo método está disponible para la webcam con
+`uv run python scripts/chessboard_camera_demo.py --manual-corners`. Es útil al
+mostrar una imagen de referencia en la pantalla de un celular: se pulsa `c`,
+se seleccionan los cuatro puntos y la cuadrícula se mantiene mientras la cámara
+y el celular no cambien de posición. Si cambian, se vuelve a pulsar `c` para
+recalibrar.
+
 ## 12. Respuestas breves para una presentación
 
 **¿Qué problema resuelve?** Convierte el tablero físico visto por cámara en una

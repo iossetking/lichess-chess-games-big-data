@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import io
 import urllib.request
-import zstandard as zstd
 from collections.abc import Iterator
 from pathlib import Path
+
+import zstandard as zstd
 
 OFFICIAL_GAMES_URL_TEMPLATE = (
     "https://database.lichess.org/standard/"
@@ -40,8 +41,8 @@ def is_remote(source: str | Path) -> bool:
 
 def _open_binary(source: str | Path) -> io.IOBase:
     if is_remote(source):
-        return urllib.request.urlopen(str(source), timeout=60)  # noqa: S310
-    return open(source, "rb")  # noqa: SIM115
+        return urllib.request.urlopen(str(source), timeout=60)
+    return open(source, "rb")
 
 
 def stream_zst_lines(source: str | Path, max_lines: int | None = None) -> Iterator[str]:
@@ -101,7 +102,7 @@ def download_to_disk(url: str, dest_path: Path, max_bytes: int | None = None) ->
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with urllib.request.urlopen(url, timeout=60) as response, dest_path.open("wb") as out:  # noqa: S310
+    with urllib.request.urlopen(url, timeout=60) as response, dest_path.open("wb") as out:
         while max_bytes is None or written < max_bytes:
             chunk = response.read(DOWNLOAD_CHUNK_BYTES)
             if not chunk:

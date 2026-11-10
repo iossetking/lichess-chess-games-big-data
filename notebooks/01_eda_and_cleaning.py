@@ -384,7 +384,7 @@ def _(extract_positions_df, games_clean, max_positions, mo, save_frame):
     positions_path = save_frame(positions, "positions_games_sample")
     mo.vstack(
         [
-            mo.md("### Posiciones de entrenamiento"),
+            mo.md("### Posiciones de entrenamiento (etapa 1)"),
             mo.callout(
                 mo.md(
                     f"**{positions.height:,}** filas `(fen, move_uci)` extraídas al "
@@ -508,7 +508,7 @@ def _(evals_clean, mo, save_frame):
     evals_path = save_frame(evals_clean, "evals_clean_sample")
     mo.vstack(
         [
-            mo.md("### Salida"),
+            mo.md("### Salida de la etapa 2"),
             mo.callout(
                 mo.md(
                     f"**{evals_clean.height:,}** filas `(fen, best_move)` guardadas en "
@@ -532,13 +532,9 @@ def _(mo):
     - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1).
     - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_model_maia_pretrained.py`.
 
-    Para el servidor final se procesa por bloques (streaming -> Parquet) y se entrena con un dataset iterable; la lógica de parseo no cambia.
+    Para el servidor final se procesa por bloques (streaming -> Parquet) y se
+    entrena con un dataset iterable; la lógica de parseo no cambia.
     """)
-    return
-
-
-@app.cell
-def _():
     return
 
 

@@ -62,8 +62,6 @@ def stream_zst_lines(source: str | Path, max_lines: int | None = None) -> Iterat
             yield line.rstrip("\r\n")
             if max_lines is not None and count >= max_lines:
                 return
-    except (zstd.ZstdError, EOFError):
-        return
     finally:
         text.close()
 
@@ -92,6 +90,17 @@ def stream_pgn_blocks(source: str | Path, max_games: int) -> Iterator[str]:
         emitted += 1
         if emitted >= max_games:
             return
+
+
+def download_sample_to_disk(
+    url: str, dest_path: Path, max_bytes: int = 50_000_000
+) -> Path:
+    """Copy a bounded prefix of ``url`` to ``dest_path`` (50 MB by default).
+
+    The default cap means asking for a local copy never silently pulls a
+    multi-gigabyte monthly archive. Pass ``max_bytes=None`` for the full file.
+    """
+    return download_to_disk(url, dest_path, max_bytes=max_bytes)
 
 
 def download_to_disk(url: str, dest_path: Path, max_bytes: int | None = None) -> Path:

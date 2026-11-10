@@ -169,6 +169,16 @@ def _(
         not train_button.value,
         mo.md("Pulsa **Entrenar la red Maia** (en CPU tarda uno o dos minutos)."),
     )
+    mo.stop(
+        evals_df.height < 20,
+        mo.callout(
+            mo.md(
+                "Se necesitan al menos 20 evaluaciones para entrenar. Vuelve a "
+                "ejecutar `01_eda_and_cleaning.py` con una muestra mayor."
+            ),
+            kind="warn",
+        ),
+    )
     limit = int(max_train.value)
     eval_val, eval_train = split_train_val(evals_df.head(min(limit, evals_df.height)))
     eval_train_ds = make_tensor_dataset(eval_train, "fen", "best_move")
@@ -378,7 +388,12 @@ def _(
     approach1_predictions = predict_top_moves(approach1_model, fen, top_k=3)
     maia_predictions = predict_top_moves(maia_model, fen, top_k=3)
     best_move = chess.Move.from_uci(maia_predictions[0][0])
-    board_svg = chess.svg.board(board, lastmove=best_move, size=380, coordinates=True)
+    board_svg = chess.svg.board(
+        board,
+        arrows=[chess.svg.Arrow(best_move.from_square, best_move.to_square)],
+        size=380,
+        coordinates=True,
+    )
 
     rows = []
     for rank, ((first_move, first_probability), (second_move, second_probability)) in enumerate(

@@ -24,7 +24,7 @@ import chess
 import polars as pl
 
 from lichess_pipeline.chess_utils import (
-    first_move_is_legal,
+    canonical_legal_uci,
     normalize_fen,
     phase_from_piece_count,
     piece_count_from_fen,
@@ -283,19 +283,24 @@ def parse_eval_line(line: str, min_depth: int = DEFAULT_MIN_DEPTH) -> dict[str, 
     evals = payload.get("evals") or []
     if not fen or not evals:
         return None
-    best = max(evals, key=lambda entry: entry.get("depth", 0))
-    depth = best.get("depth", 0)
+    valid_evals = [entry for entry in evals if isinstance(entry, dict)]
+    if not valid_evals:
+        return None
+    best = max(valid_evals, key=lambda entry: entry.get("depth") or 0)
+    depth = best.get("depth") or 0
     if depth < min_depth:
         return None
-    pvs = best.get("pvs") or []
-    if not pvs:
+    pvs = best.get("pvs")
+    if not isinstance(pvs, list) or not pvs:
         return None
-    first_pv = pvs[0] or {}
+    first_pv = pvs[0]
+    if not isinstance(first_pv, dict):
+        return None
     tokens = str(first_pv.get("line") or "").split()
     if not tokens:
         return None
-    best_move = tokens[0]
-    if not first_move_is_legal(fen, best_move):
+    best_move = canonical_legal_uci(fen, tokens[0])
+    if best_move is None:
         return None
     norm = normalize_fen(fen)
     count = piece_count_from_fen(norm)

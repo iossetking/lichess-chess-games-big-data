@@ -106,6 +106,10 @@ def _(mo):
     piezas blancas, 6 de negras y 1 para el turno) y la jugada como una de
     `64 x 64 = 4096` clases `origen -> destino`.
 
+    Limitación conocida: los enroques y la captura al paso del FEN no se
+    codifican como planos. La máscara de legalidad los usa al predecir, pero el
+    modelo no aprende a preferirlos. Añadir dos planos es una mejora futura.
+
     Este cuaderno funciona solo: si los Parquet no existen, genera una muestra
     pequeña directamente desde `database.lichess.org`.
     """)
@@ -177,6 +181,16 @@ def _(
     mo.stop(
         not train_button.value,
         mo.md("Pulsa **Entrenar las dos etapas** (en CPU tarda uno o dos minutos)."),
+    )
+    mo.stop(
+        positions_df.height < 20 or evals_df.height < 20,
+        mo.callout(
+            mo.md(
+                "Se necesitan al menos 20 posiciones en cada fuente para entrenar. "
+                "Vuelve a ejecutar `01_eda_and_cleaning.py` con una muestra mayor."
+            ),
+            kind="warn",
+        ),
     )
     limit = int(max_train.value)
     human_val, human_train = split_train_val(positions_df.head(min(limit, positions_df.height)))
@@ -327,24 +341,38 @@ def _(
     axes[1, 1].legend()
 
     figure.tight_layout()
+
+    delta_top1 = 100 * (after_finetuning["top1"] - before_finetuning["top1"])
+    trend = "mejora" if delta_top1 >= 0 else "no mejora"
+    comparison_figure, comparison_axes = plt.subplots(figsize=(6, 3.5))
+    comparison_axes.bar(
+        ["Etapa 1 sin ajustar", "Etapa 2 ajustada"],
+        [100 * before_finetuning["top1"], 100 * after_finetuning["top1"]],
+    )
+    comparison_axes.set(
+        title="Top-1 en la misma validación de Stockfish",
+        ylabel="% de aciertos",
+    )
+    comparison_figure.tight_layout()
+
     mo.vstack(
         [
             mo.md("## Resultados"),
             mo.callout(
                 mo.md(
-                    "El ajuste fino mejora la coincidencia con la jugada de Stockfish: "
-                    "compara la fila 2 con la fila 3. La exactitud es baja en términos "
-                    "absolutos porque hay ~30 jugadas legales por posición y el modelo se "
-                    "entrena con una muestra mínima; crece al usar el dataset completo en "
-                    "el servidor."
+                    f"El ajuste fino **{trend}** la coincidencia con la jugada de "
+                    f"Stockfish: {delta_top1:+.2f} puntos de Top-1 (fila 3 frente a "
+                    "fila 2). La exactitud es baja en términos absolutos porque hay "
+                    "~30 jugadas legales por posición y el modelo se entrena con una "
+                    "muestra mínima; crece al usar el dataset completo en el servidor."
                 ),
                 kind="info",
             ),
             mo.ui.table(comparison, pagination=False),
-            figure,
+            mo.hstack([figure, comparison_figure], justify="start"),
         ]
     )
-    return comparison, figure
+    return comparison, comparison_figure, figure
 
 
 @app.cell
@@ -432,7 +460,12 @@ def _(
     stage1_predictions = predict_top_moves(stage1_model, fen, top_k=3)
     stage2_predictions = predict_top_moves(stage2_model, fen, top_k=3)
     best_move = chess.Move.from_uci(stage2_predictions[0][0])
-    board_svg = chess.svg.board(board, lastmove=best_move, size=380, coordinates=True)
+    board_svg = chess.svg.board(
+        board,
+        arrows=[chess.svg.Arrow(best_move.from_square, best_move.to_square)],
+        size=380,
+        coordinates=True,
+    )
 
     rows = []
     for rank, ((first_move, first_probability), (second_move, second_probability)) in enumerate(

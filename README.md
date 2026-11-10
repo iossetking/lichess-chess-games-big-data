@@ -53,8 +53,12 @@ del cuaderno 1 todavía no existen.
   ajusta con las mejores jugadas de Stockfish. La tabla de resultados de cada
   cuaderno compara Top-1 y Top-3 antes y después del ajuste.
 
-Para el servidor final solo cambian los tamaños de muestra: la misma lógica de
-lectura y entrenamiento escala al dataset completo de 2 TB.
+Para el servidor final no basta con subir los números: el pipeline actual
+materializa las muestras en memoria (listas de Python y DataFrames completos,
+más un tensor y una máscara de 4096 posiciones por FEN). La ejecución a escala
+completa requiere procesar por bloques hacia Parquet y un dataset de
+entrenamiento iterable que codifique el FEN y su máscara bajo demanda. La
+lógica de parseo y el contrato del modelo no cambian; solo la capa de E/S.
 
 ## Demo de visión: tablero físico por webcam
 

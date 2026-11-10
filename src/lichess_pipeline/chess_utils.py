@@ -50,15 +50,28 @@ def phase_from_fen(fen: str) -> str:
     return phase_from_piece_count(piece_count_from_fen(fen))
 
 
-def first_move_is_legal(fen: str, move_uci: str) -> bool:
-    """True when ``fen`` is a valid position and ``move_uci`` is legal in it."""
+def canonical_legal_uci(fen: str, move_uci: str) -> str | None:
+    """Return ``move_uci`` in standard UCI form when legal, else ``None``.
+
+    The official evaluation files write the principal variation in
+    ``UCI_Chess960``, so castling can appear as ``e1h1``. This normalizes it to
+    the standard ``e1g1`` that the 64x64 move encoding and legal-move mask use.
+    Null moves (``0000``) and moves that are not legal are rejected.
+    """
     if not fen or not move_uci:
-        return False
+        return None
     try:
         board = chess.Board(fen)
         if not board.is_valid():
-            return False
+            return None
         move = board.parse_uci(move_uci)
-        return board.uci(move) == move_uci
+        if move not in board.legal_moves:
+            return None
+        return board.uci(move)
     except ValueError:
-        return False
+        return None
+
+
+def first_move_is_legal(fen: str, move_uci: str) -> bool:
+    """True when ``fen`` is a valid position and ``move_uci`` is legal in it."""
+    return canonical_legal_uci(fen, move_uci) is not None

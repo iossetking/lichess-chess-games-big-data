@@ -1,5 +1,7 @@
 import chess
 import polars as pl
+import pytest
+import torch
 
 from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
 from lichess_pipeline.model.scratch_net import (
@@ -71,3 +73,19 @@ def test_evaluate_model_reports_loss_and_top_k_accuracy():
     assert set(metrics) == {"loss", "top1", "top3"}
     assert metrics["top3"] >= metrics["top1"]
     assert 0.0 <= metrics["top1"] <= 1.0
+
+
+def test_make_tensor_dataset_rejects_an_empty_frame():
+    empty = pl.DataFrame(schema={"fen": pl.String, "move_uci": pl.String})
+    with pytest.raises(ValueError, match="empty"):
+        make_tensor_dataset(empty, "fen", "move_uci")
+
+
+def test_train_model_rejects_an_empty_dataset():
+    empty = torch.utils.data.TensorDataset(
+        torch.zeros((0, 13, 8, 8)),
+        torch.zeros((0,), dtype=torch.long),
+        torch.zeros((0, 4096), dtype=torch.bool),
+    )
+    with pytest.raises(ValueError, match="empty"):
+        train_model(ChessPolicyNet(), empty, empty, epochs=1, batch_size=8)

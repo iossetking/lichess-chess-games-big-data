@@ -74,3 +74,27 @@ def test_parse_eval_line_selects_max_depth_and_handles_missing_pvs():
     assert parsed["cp"] == 20
     assert parse_eval_line('{"fen": "invalid", "evals": []}', min_depth=20) is None
     assert parse_eval_line("not json", min_depth=20) is None
+
+
+def test_parse_eval_line_canonicalizes_chess960_castling():
+    castling = json.dumps(
+        {
+            "fen": "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1",
+            "evals": [{"knodes": 10, "depth": 30, "pvs": [{"cp": 10, "line": "e8h8"}]}],
+        }
+    )
+    parsed = parse_eval_line(castling, min_depth=20)
+    assert parsed is not None
+    assert parsed["best_move"] == "e8g8"
+
+
+def test_parse_eval_line_returns_none_for_structurally_malformed_entries():
+    def payload(evals):
+        return json.dumps({"fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "evals": evals})
+
+    assert parse_eval_line(payload([None]), min_depth=20) is None
+    assert parse_eval_line(payload([{"depth": 30, "pvs": []}]), min_depth=20) is None
+    assert parse_eval_line(payload([{"depth": 30}]), min_depth=20) is None
+    assert parse_eval_line(payload([{"depth": 30, "pvs": [None]}]), min_depth=20) is None
+    assert parse_eval_line(payload([{"depth": 30, "pvs": [{"cp": 5}]}]), min_depth=20) is None
+    assert parse_eval_line(payload([{"depth": 30, "pvs": [{"line": "0000"}]}]), min_depth=20) is None

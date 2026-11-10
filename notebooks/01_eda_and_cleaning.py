@@ -274,13 +274,21 @@ def _(mo, pl, raw_games):
         .sort("partidas", descending=True)
         .head(10)
     )
+    time_controls = (
+        raw_games.group_by("TimeControl")
+        .len(name="partidas")
+        .sort("partidas", descending=True)
+        .head(10)
+    )
     mo.vstack(
         [
+            mo.md("#### Controles de tiempo más frecuentes"),
+            mo.ui.table(time_controls, pagination=False),
             mo.md("#### Aperturas más frecuentes (no se usan como entrada del modelo)"),
             mo.ui.table(openings, pagination=False),
         ]
     )
-    return (openings,)
+    return openings, time_controls
 
 
 @app.cell
@@ -487,9 +495,8 @@ def _(mo):
     - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1).
     - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_model_maia_pretrained.py`.
 
-    Para el servidor final basta con subir los valores de `max_games`,
-    `max_positions` y `max_evals`, o leer el archivo completo con los mismos
-    parsers: la lógica es idéntica.
+    Para el servidor final se procesa por bloques (streaming -> Parquet) y se
+    entrena con un dataset iterable; la lógica de parseo no cambia.
     """)
     return
 

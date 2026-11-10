@@ -1,6 +1,7 @@
 import chess
 
 from lichess_pipeline.chess_utils import (
+    canonical_legal_uci,
     first_move_is_legal,
     normalize_fen,
     phase_from_piece_count,
@@ -33,3 +34,17 @@ def test_first_move_is_legal_accepts_legal_and_rejects_illegal():
     assert first_move_is_legal(chess.STARTING_FEN, "e2e5") is False
     assert first_move_is_legal("not a fen", "e2e4") is False
     assert first_move_is_legal(chess.STARTING_FEN, "") is False
+
+
+def test_first_move_is_legal_accepts_standard_and_chess960_castling():
+    fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"
+    assert first_move_is_legal(fen, "e1g1") is True
+    assert first_move_is_legal(fen, "e1h1") is True
+    assert canonical_legal_uci(fen, "e1h1") == "e1g1"
+    assert canonical_legal_uci(fen, "e1g1") == "e1g1"
+
+
+def test_first_move_is_legal_rejects_null_and_illegal_moves():
+    assert first_move_is_legal(chess.STARTING_FEN, "0000") is False
+    assert canonical_legal_uci(chess.STARTING_FEN, "0000") is None
+    assert canonical_legal_uci("not a fen", "e2e4") is None

@@ -8,6 +8,12 @@ return an illegal move, only a badly ranked one.
 
 Board orientation follows the natural tensor layout: row 0 is rank 8 and row 7
 is rank 1, matching how a FEN string is read left to right, top to bottom.
+
+Known limitation: castling rights and the en-passant square are part of the FEN
+but not of the tensor. They still shape the legal-move mask, so predictions
+remain legal, but the network cannot learn to *prefer* castling or an
+en-passant capture from them, and two positions that differ only in those
+fields look identical. Adding two planes is a backward-compatible change.
 """
 
 from __future__ import annotations

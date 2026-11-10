@@ -67,6 +67,8 @@ def make_tensor_dataset(
     way inference does. It costs 4096 booleans per position, which is small
     next to the board tensor for the notebook-sized samples used here.
     """
+    if df.height == 0:
+        raise ValueError("Cannot build a tensor dataset from an empty frame")
     fens = df[fen_col].to_list()
     features = torch.from_numpy(np.stack([encode_fen(fen) for fen in fens]))
     targets = torch.tensor(
@@ -111,6 +113,8 @@ def evaluate_model(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> dict[str, float]:
     """Score ``model`` on a dataset: legal-move loss plus Top-1/Top-3 accuracy."""
+    if len(dataset) == 0:
+        raise ValueError("Cannot evaluate on an empty dataset")
     loss, top1, top3 = _evaluate(
         model, _loader(dataset, batch_size, shuffle=False), nn.CrossEntropyLoss()
     )
@@ -130,6 +134,8 @@ def train_model(
     The same function serves both stages: call it once with the human-game
     dataset, then again with the Stockfish dataset and a smaller ``lr``.
     """
+    if len(train_ds) == 0 or len(val_ds) == 0:
+        raise ValueError("Train and validation datasets must not be empty")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
     train_loader = _loader(train_ds, batch_size, shuffle=True)

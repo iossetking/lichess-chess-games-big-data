@@ -3,6 +3,7 @@ from pathlib import Path
 import zstandard as zstd
 
 from lichess_pipeline.data_ingestion import (
+    download_sample_to_disk,
     games_month_url,
     stream_pgn_blocks,
     stream_zst_lines,
@@ -40,3 +41,12 @@ def test_stream_pgn_blocks_splits_games_and_respects_max_games(tmp_path: Path):
     assert len(blocks) == 1
     assert "https://lichess.org/abcd1234" in blocks[0]
     assert "1. e4 e5" in blocks[0]
+
+
+def test_download_sample_to_disk_writes_a_bounded_prefix(tmp_path: Path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"0123456789")
+    destination = tmp_path / "prefix.bin"
+    result = download_sample_to_disk(source.as_uri(), destination, max_bytes=4)
+    assert result == destination
+    assert destination.read_bytes() == b"0123"

@@ -46,7 +46,6 @@ def _():
         return path
 
     return (
-        PROCESSED_DIR,
         RAW_DIR,
         VALID_RESULTS,
         clean_games_df,
@@ -68,22 +67,16 @@ def _(mo):
     mo.md(r"""
     # 1. Exploración y limpieza de los datos oficiales de Lichess
 
-    Este cuaderno lee **directamente de `database.lichess.org`**, sin depender
-    de un espejo en Hugging Face, y deja listos dos archivos Parquet para el
-    modelo:
+    Se leen los datos **directamente de `database.lichess.org`**, y deja listos dos archivos Parquet para el modelo:
 
     | Fuente | Archivo oficial | Uso en el modelo |
     |---|---|---|
-    | Partidas estándar | `lichess_db_standard_rated_AAAA-MM.pgn.zst` | Etapa 1: jugadas humanas de Elo alto |
-    | Evaluaciones | `lichess_db_eval.jsonl.zst` | Etapa 2: mejores jugadas de Stockfish |
+    | Partidas estándar | `lichess_db_standard_rated_AAAA-MM.pgn.zst` | Entrenamiento: jugadas humanas de Elo alto |
+    | Evaluaciones | `lichess_db_eval.jsonl.zst` | Fine tuning: mejores jugadas de Stockfish |
 
-    Solo se descarga el prefijo necesario: el flujo HTTP se cierra en cuanto se
-    alcanza el número de partidas o de evaluaciones pedido. La casilla de
-    "guardar `.zst`" copia además un trozo del archivo en `data/raw/`.
+    Solo se descarga el prefijo necesario: el flujo HTTP se cierra en cuanto se alcanza el número de partidas o de evaluaciones pedido.
 
-    **Salidas en `data/processed/`:**
-    `games_clean_sample.parquet`, `positions_games_sample.parquet` y
-    `evals_clean_sample.parquet`.
+    **Output `data/processed/`:** `games_clean_sample.parquet`, `positions_games_sample.parquet` y `evals_clean_sample.parquet`.
     """)
     return
 
@@ -144,7 +137,15 @@ def _(mo):
 
 
 @app.cell
-def _(games_button, games_sample_url, max_games, mo, month, parse_pgn_sample_df, year):
+def _(
+    games_button,
+    games_sample_url,
+    max_games,
+    mo,
+    month,
+    parse_pgn_sample_df,
+    year,
+):
     mo.stop(
         not games_button.value,
         mo.md("Pulsa **Leer partidas oficiales** para cargar la muestra."),
@@ -158,7 +159,7 @@ def _(games_button, games_sample_url, max_games, mo, month, parse_pgn_sample_df,
         ),
         kind="success",
     )
-    return games_source, raw_games
+    return (raw_games,)
 
 
 @app.cell
@@ -218,7 +219,7 @@ def _(mo, pl, raw_games):
             mo.ui.table(null_counts, pagination=False),
         ]
     )
-    return (null_counts,)
+    return
 
 
 @app.cell
@@ -263,11 +264,11 @@ def _(plt, raw_games):
 
     figure.tight_layout()
     figure
-    return (figure,)
+    return
 
 
 @app.cell
-def _(mo, pl, raw_games):
+def _(mo, raw_games):
     openings = (
         raw_games.group_by("ECO", "Opening")
         .len(name="partidas")
@@ -288,7 +289,7 @@ def _(mo, pl, raw_games):
             mo.ui.table(openings, pagination=False),
         ]
     )
-    return openings, time_controls
+    return
 
 
 @app.cell
@@ -330,7 +331,7 @@ def _(VALID_RESULTS, clean_games_df, min_elo, mo, pl, raw_games):
             ),
         ]
     )
-    return games_clean, ladder
+    return (games_clean,)
 
 
 @app.cell
@@ -352,7 +353,7 @@ def _(extract_positions_df, games_clean, max_positions, mo, save_frame):
             mo.ui.table(positions.head(5), pagination=False),
         ]
     )
-    return games_path, positions, positions_path
+    return
 
 
 @app.cell
@@ -385,14 +386,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    evals_button,
-    evals_url,
-    load_clean_evals_df,
-    max_evals,
-    min_depth,
-    mo,
-):
+def _(evals_button, evals_url, load_clean_evals_df, max_evals, min_depth, mo):
     mo.stop(
         not evals_button.value,
         mo.md("Pulsa **Leer evaluaciones oficiales** para cargar la muestra."),
@@ -463,7 +457,7 @@ def _(evals_clean, mo, pl, plt):
             figure_evals,
         ]
     )
-    return (figure_evals,)
+    return
 
 
 @app.cell
@@ -482,7 +476,7 @@ def _(evals_clean, mo, save_frame):
             mo.ui.table(evals_clean.head(5), pagination=False),
         ]
     )
-    return (evals_path,)
+    return
 
 
 @app.cell(hide_code=True)

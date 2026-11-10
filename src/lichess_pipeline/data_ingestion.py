@@ -1,5 +1,4 @@
-"""Stage 1: read-only access to the official Lichess database files.
-
+"""
 Streams `.pgn.zst` (standard games) and `.jsonl.zst` (Stockfish evaluations)
 either from ``https://database.lichess.org/`` or from a local file,
 decompressing on the fly with ``zstandard``. Nothing is parsed here beyond

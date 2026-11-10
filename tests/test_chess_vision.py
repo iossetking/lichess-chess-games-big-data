@@ -5,9 +5,11 @@ from lichess_pipeline.chess_vision import (
     FenStabilizer,
     PieceDetection,
     board_destination,
+    detect_green_screen_board,
     detections_to_fen,
     extrapolate_board_corners,
     marker_centers_by_corner,
+    piece_description_from_label,
     piece_symbol_from_label,
     square_regions,
     validate_ordered_board_corners,
@@ -23,11 +25,25 @@ def test_extrapolate_board_corners_expands_a_regular_inner_grid():
     np.testing.assert_array_equal(extrapolate_board_corners(inner), [[5, 5], [75, 5], [75, 75], [5, 75]])
 
 
+def test_green_screen_board_finds_grid_without_pieces():
+    image = np.empty((400, 400, 3), dtype=np.uint8)
+    for row in range(8):
+        for column in range(8):
+            image[row * 50:(row + 1) * 50, column * 50:(column + 1) * 50] = (
+                (208, 236, 235) if (row + column) % 2 == 0 else (86, 149, 119)
+            )
+    np.testing.assert_allclose(detect_green_screen_board(image),
+                               [[0, 0], [399, 0], [399, 399], [0, 399]], atol=2)
+    assert detect_green_screen_board(np.zeros_like(image)) is None
+
+
 def test_piece_labels_accept_common_yolo_conventions():
     assert piece_symbol_from_label("w-pawn") == "P"
     assert piece_symbol_from_label("white_knight") == "N"
     assert piece_symbol_from_label("black king") == "k"
     assert piece_symbol_from_label("bishop") is None
+    assert piece_description_from_label("w-pawn") == "peón blanco"
+    assert piece_description_from_label("black king") == "rey negro"
 
 
 def test_detections_to_fen_maps_centres_and_keeps_highest_confidence_per_square():

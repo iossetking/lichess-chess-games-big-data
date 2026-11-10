@@ -89,6 +89,56 @@ El comando exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
 mejor checkpoint a `data/models/chess-pieces.pt`. Para uso confiable, añade al
 ajuste fotos de tu cámara, piezas e iluminación.
 
+La vista en vivo dibuja cada detección con su tipo y color: cajas azul claro
+para blancas y rojo para negras, por ejemplo `peón negro 0.91`. El modelo que
+se entrenó aquí es de **detección** y por eso usa cajas. Si se proporcionan
+pesos **YOLO-seg** de piezas, el mismo comando superpone además la máscara de
+píxeles de cada peón, torre, caballo, etc.:
+
+Ya hay unos pesos YOLO-seg validados en `data/models/chess-pieces-seg.pt`.
+Úsalos así:
+
+```bash
+uv run python scripts/live_chess_fen.py \
+  --weights data/models/chess-pieces-seg.pt \
+  --require-segmentation \
+  --confidence 0.25
+```
+
+No se debe entrenar YOLO-seg con este dataset de cajas: la segmentación real
+necesita una máscara o polígono de cada pieza. El lector ya está preparado para
+esos pesos; el siguiente conjunto de ajuste debe anotar los contornos de tus
+piezas reales, especialmente con manos y oclusiones.
+
+### Tablero digital mostrado en celular
+
+Si la cámara mira una imagen de tablero en el celular, los pesos de tablero
+físico no generalizan a sus sprites 2D. Para el diseño de piezas gris/blanco
+incluido como plantilla se entrenó un YOLO-seg específico y ya está disponible
+en `data/models/screen-chess-pieces-seg.pt`:
+
+```bash
+uv run python scripts/live_chess_fen.py \
+  --weights data/models/screen-chess-pieces-seg.pt \
+  --require-segmentation --screen-board --imgsz 416 \
+  --confidence 0.25 --camera 0 \
+  --turn w --castling KQkq
+```
+
+El modelo detecta y segmenta las 32 piezas de la plantilla y genera el FEN
+inicial correctamente. [train_screen_chess_yoloseg.py](scripts/train_screen_chess_yoloseg.py)
+regenera las posiciones sintéticas y reentrena el modelo si cambias el estilo
+de las piezas.
+
+La cámara y YOLO funcionan en hilos distintos. La ventana `Camera` sigue
+actualizándose mientras se calcula la siguiente segmentación; la ventana
+`Board + YOLO pieces` cambia cuando termina cada inferencia. `CAM LIVE` muestra
+los FPS de YOLO y la antigüedad real de la última predicción. El modo
+`--screen-board` localiza rápidamente el tablero verde de esta plantilla y
+guarda sus esquinas. Pulsa `r` para recalibrar al mover cámara o tablero;
+`--redetect-every 60` lo hace periódicamente si el encuadre cambia. Un tamaño
+`--imgsz 416` reduce el tiempo de inferencia con posible pérdida de detalle.
+
 Al terminar los cuadernos de este repositorio, conecta directamente el modelo
 de jugadas:
 

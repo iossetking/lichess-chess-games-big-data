@@ -30,6 +30,9 @@ class PieceDetection:
     confidence: float
     # ``xyxy`` is deliberately model-neutral: (left, top, right, bottom).
     xyxy: tuple[float, float, float, float]
+    # A YOLO-seg checkpoint supplies the pixel contour; a detection checkpoint
+    # leaves it as ``None`` and is still rendered with a labelled box.
+    mask: np.ndarray | None = None
 
 
 _PIECE_SYMBOLS = {
@@ -102,6 +105,46 @@ def detect_board_corners(frame: np.ndarray) -> np.ndarray | None:
     return extrapolate_board_corners(corners)
 
 
+def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
+    """Find the green/cream 2D board by its green square regions, quickly.
+
+    The convex hull of green squares reaches all four outer corners of the
+    alternating grid. This path is intended for the supplied screen template.
+    """
+    import cv2
+
+    height, width = frame.shape[:2]
+    scale = min(1.0, 480 / max(height, width))
+    small = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    green = cv2.inRange(hsv, (32, 35, 30), (95, 255, 240))
+    contours, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    eligible = [contour for contour in contours if cv2.contourArea(contour) > small.shape[0] * small.shape[1] * 0.001]
+    if not eligible or sum(cv2.contourArea(contour) for contour in eligible) < small.shape[0] * small.shape[1] * 0.08:
+        return None
+    hull = cv2.convexHull(np.concatenate(eligible))
+    rectangle = cv2.minAreaRect(hull)
+    (_, _), (rw, rh), _ = rectangle
+    if min(rw, rh) < min(small.shape[:2]) * 0.25 or max(rw, rh) / min(rw, rh) > 1.8:
+        return None
+    points = cv2.boxPoints(rectangle)
+    sums, differences = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
+    ordered = points[[np.argmin(sums), np.argmin(differences), np.argmax(sums), np.argmax(differences)]]
+    if len(np.unique(ordered, axis=0)) != 4:
+        return None
+    projected = cv2.warpPerspective(green, cv2.getPerspectiveTransform(
+        ordered.astype(np.float32), board_destination(320)), (320, 320))
+    matches = 0
+    for row in range(2, 6):
+        for col in range(8):
+            patch = projected[row * 40 + 16:row * 40 + 24, col * 40 + 16:col * 40 + 24]
+            is_green = np.mean(patch) > 127
+            matches += is_green == ((row + col) % 2 == 1)
+    if matches < 26:
+        return None
+    return (ordered / scale).astype(np.float32)
+
+
 def square_regions(size: int = DEFAULT_BOARD_SIZE) -> dict[str, tuple[int, int, int, int]]:
     """Map algebraic names (a8 through h1) to ``(x1, y1, x2, y2)`` pixels."""
     if size % 8:
@@ -123,6 +166,16 @@ def piece_symbol_from_label(label: str) -> str | None:
     """
     normalized = "".join(character for character in label.lower() if character.isalnum())
     return _PIECE_SYMBOLS.get(normalized)
+
+
+def piece_description_from_label(label: str) -> str | None:
+    """Return a concise Spanish description such as ``"peón negro"``."""
+    symbol = piece_symbol_from_label(label)
+    if symbol is None:
+        return None
+    names = {"p": "peón", "n": "caballo", "b": "alfil", "r": "torre", "q": "dama", "k": "rey"}
+    colour = "blanco" if symbol.isupper() else "negro"
+    return f"{names[symbol.lower()]} {colour}"
 
 
 def detections_to_fen(

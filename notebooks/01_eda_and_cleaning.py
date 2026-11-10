@@ -81,6 +81,49 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## `games_clean_sample.parquet` — Partidas estándar
+
+    | Columna | Descripción |
+    |---|---|
+    | `game_id` | Identificador de la partida, extraído del tag `Site` de Lichess. |
+    | `White` | Nombre de usuario del jugador de blancas. |
+    | `Black` | Nombre de usuario del jugador de negras. |
+    | `Result` | Resultado oficial: `1-0`, `0-1` o `1/2-1/2`. |
+    | `WhiteElo` | Elo de las blancas al inicio de la partida. |
+    | `BlackElo` | Elo de las negras al inicio de la partida. |
+    | `WhiteRatingDiff` | Variación de Elo de las blancas tras la partida. |
+    | `BlackRatingDiff` | Variación de Elo de las negras tras la partida. |
+    | `UTCDate` | Fecha de la partida en UTC (`AAAA.MM.DD`). |
+    | `UTCTime` | Hora de inicio de la partida en UTC (`HH:MM:SS`). |
+    | `ECO` | Código ECO de la apertura. |
+    | `Opening` | Nombre de la apertura. |
+    | `Event` | Evento o ritmo de la partida (p. ej. `Rated Blitz game`). |
+    | `TimeControl` | Control de tiempo (`segundos` o `segundos+incremento`). |
+    | `Termination` | Motivo del final: `Normal`, `Time forfeit` o `Abandoned`. |
+    | `movetext` | Jugadas en notación SAN reproducidas y validadas con `python-chess`, sin comentarios ni reloj. |
+    | `num_plies` | Número de medias jugadas (plies) válidas de la partida. |
+
+    ## `evals_clean_sample.parquet` — Evaluaciones de Stockfish
+
+    | Columna | Descripción |
+    |---|---|
+    | `fen` | FEN original de la posición tal como aparece en el archivo oficial. |
+    | `norm_fen` | FEN normalizado (primeros cuatro campos); se usa como clave para deduplicar posiciones. |
+    | `turn` | Bando al que le toca mover: `w` (blancas) o `b` (negras). |
+    | `piece_count` | Número total de piezas sobre el tablero. |
+    | `game_phase` | Fase derivada del número de piezas: `opening` (>= 29), `middlegame` (15–28) o `endgame` (<= 14). |
+    | `depth` | Profundidad de búsqueda de Stockfish, en plies. |
+    | `knodes` | Miles de nodos visitados por Stockfish durante la búsqueda. |
+    | `cp` | Evaluación en centipeones desde el punto de vista de las blancas. |
+    | `mate` | Jugadas hasta el mate forzado (signo según el bando); nulo si no hay mate. |
+    | `best_move` | Primera jugada de la variante principal, en UCI y validada como legal. |
+    """)
+    return
+
+
 @app.cell
 def _(mo):
     year = mo.ui.dropdown(options=[2024, 2025], value=2025, label="Año de las partidas")
@@ -341,7 +384,7 @@ def _(extract_positions_df, games_clean, max_positions, mo, save_frame):
     positions_path = save_frame(positions, "positions_games_sample")
     mo.vstack(
         [
-            mo.md("### Posiciones de entrenamiento (etapa 1)"),
+            mo.md("### Posiciones de entrenamiento"),
             mo.callout(
                 mo.md(
                     f"**{positions.height:,}** filas `(fen, move_uci)` extraídas al "
@@ -465,7 +508,7 @@ def _(evals_clean, mo, save_frame):
     evals_path = save_frame(evals_clean, "evals_clean_sample")
     mo.vstack(
         [
-            mo.md("### Salida de la etapa 2"),
+            mo.md("### Salida"),
             mo.callout(
                 mo.md(
                     f"**{evals_clean.height:,}** filas `(fen, best_move)` guardadas en "
@@ -489,9 +532,13 @@ def _(mo):
     - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1).
     - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_model_maia_pretrained.py`.
 
-    Para el servidor final se procesa por bloques (streaming -> Parquet) y se
-    entrena con un dataset iterable; la lógica de parseo no cambia.
+    Para el servidor final se procesa por bloques (streaming -> Parquet) y se entrena con un dataset iterable; la lógica de parseo no cambia.
     """)
+    return
+
+
+@app.cell
+def _():
     return
 
 

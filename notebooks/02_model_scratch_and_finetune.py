@@ -66,10 +66,10 @@ def _():
         {"axes.spines.top": False, "axes.spines.right": False, "figure.dpi": 100}
     )
     return (
-        MODELS_DIR,
-        POSITIONS_PATH,
         ChessPolicyNet,
         EVALS_PATH,
+        MODELS_DIR,
+        POSITIONS_PATH,
         chess,
         evaluate_model,
         load_evals,
@@ -88,25 +88,25 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # 2. Modelo de mejor jugada: entrenamiento desde cero + ajuste fino
+    # 2. Modelo de mejor jugada: entrenamiento desde cero + fine tuning
 
     **Enfoque 1 (principal).** Un único modelo, dos etapas:
 
-    1. **Desde cero con jugadas humanas.** La red aprende `FEN -> jugada jugada`
+    1. **Desde cero con jugadas humanas.** La red aprende `FEN -> jugada`, jugada
        a partir de partidas de Lichess con Elo alto (`positions_games_sample.parquet`,
        derivado de `lichess_db_standard_rated_*.pgn.zst`).
     2. **Ajuste fino con Stockfish.** Se cargan los mismos pesos y se entrenan
        con `FEN -> mejor jugada` de `lichess_db_eval.jsonl.zst`
        (`evals_clean_sample.parquet`), con una tasa de aprendizaje menor.
 
-    **Contrato del modelo:** entra una cadena FEN y sale una jugada UCI. Las
+    Entra una cadena FEN y sale una jugada UCI. Las
     jugadas ilegales se enmascaran antes del `softmax`, así que la salida es
     legal por construcción: el modelo solo puede equivocarse de *elección*, no
     de *legalidad*. El tablero se codifica como `13 x 8 x 8` (6 planos de
     piezas blancas, 6 de negras y 1 para el turno) y la jugada como una de
     `64 x 64 = 4096` clases `origen -> destino`.
 
-    Limitación conocida: los enroques y la captura al paso del FEN no se
+    Limitación: los enroques y la captura al paso del FEN no se
     codifican como planos. La máscara de legalidad los usa al predecir, pero el
     modelo no aprende a preferirlos. Añadir dos planos es una mejora futura.
 
@@ -117,7 +117,7 @@ def _(mo):
 
 
 @app.cell
-def _(POSITIONS_PATH, EVALS_PATH, load_evals, load_positions, mo, pl):
+def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
     positions_df = load_positions()
     evals_df = load_evals()
     sources = pl.DataFrame(
@@ -156,10 +156,10 @@ def _(mo):
     epochs_stage2 = mo.ui.slider(
         start=1, stop=10, step=1, value=2, label="Épocas etapa 2 (Stockfish)"
     )
-    train_button = mo.ui.run_button(label="Entrenar las dos etapas")
+    train_button = mo.ui.run_button(label="Guardar parametros")
     mo.vstack(
         [
-            mo.md("## Entrenamiento"),
+            mo.md("## Parametros de Entrenamiento para ambas etapas"),
             mo.hstack([max_train, epochs_stage1, epochs_stage2], justify="start"),
             train_button,
         ]
@@ -169,7 +169,6 @@ def _(mo):
 
 @app.cell
 def _(
-    epochs_stage1,
     evals_df,
     make_tensor_dataset,
     max_train,
@@ -180,7 +179,7 @@ def _(
 ):
     mo.stop(
         not train_button.value,
-        mo.md("Pulsa **Entrenar las dos etapas** (en CPU tarda uno o dos minutos)."),
+        mo.md("Pulsa **Guardar parametros**."),
     )
     mo.stop(
         positions_df.height < 20 or evals_df.height < 20,
@@ -372,17 +371,11 @@ def _(
             mo.hstack([figure, comparison_figure], justify="start"),
         ]
     )
-    return comparison, comparison_figure, figure
+    return
 
 
 @app.cell
-def _(
-    MODELS_DIR,
-    mo,
-    stage1_model,
-    stage2_model,
-    torch,
-):
+def _(MODELS_DIR, mo, stage1_model, stage2_model, torch):
     stage1_path = MODELS_DIR / "approach1_stage1_scratch.pt"
     stage2_path = MODELS_DIR / "approach1_stage2_finetuned.pt"
     torch.save(stage1_model.state_dict(), stage1_path)
@@ -391,7 +384,35 @@ def _(
         mo.md(f"Pesos guardados:\n\n- `{stage1_path}`\n- `{stage2_path}`"),
         kind="success",
     )
-    return stage1_path, stage2_path
+    return
+
+
+@app.cell
+def _(ChessPolicyNet, MODELS_DIR, mo, torch):
+    stage1_weights = MODELS_DIR / "approach1_stage1_scratch.pt"
+    stage2_weights = MODELS_DIR / "approach1_stage2_finetuned.pt"
+    mo.stop(
+        not (stage1_weights.exists() and stage2_weights.exists()),
+        mo.callout(
+            mo.md(
+                "No hay pesos guardados todavía. Pulsa **Guardar parametros** "
+                "para entrenar y guardar los dos modelos."
+            ),
+            kind="warn",
+        ),
+    )
+    stage1_eval_model = ChessPolicyNet()
+    stage1_eval_model.load_state_dict(
+        torch.load(stage1_weights, map_location="cpu", weights_only=True)
+    )
+    stage1_eval_model.eval()
+    stage2_eval_model = ChessPolicyNet()
+    stage2_eval_model.load_state_dict(
+        torch.load(stage2_weights, map_location="cpu", weights_only=True)
+    )
+    stage2_eval_model.eval()
+    mo.md(f"Pesos cargados desde `{MODELS_DIR}`.")
+    return stage1_eval_model, stage2_eval_model
 
 
 @app.cell
@@ -409,7 +430,11 @@ def _(chess, mo):
         value="Personalizado (usar el FEN de abajo)",
         label="Posición de ejemplo",
     )
-    fen_input = mo.ui.text_area(value=chess.STARTING_FEN, label="FEN escrito a mano")
+    fen_input = mo.ui.text_area(
+        value=chess.STARTING_FEN,
+        label="FEN escrito a mano",
+        debounce=500,
+    )
     mo.vstack(
         [
             mo.md("## Predicción interactiva"),
@@ -434,11 +459,16 @@ def _(
     predict_top_moves,
     preset,
     presets,
-    stage1_model,
-    stage2_model,
+    stage1_eval_model,
+    stage2_eval_model,
 ):
     selected_preset = presets[preset.value]
     fen = selected_preset if selected_preset is not None else fen_input.value.strip()
+    source = (
+        f"preset «{preset.value}»"
+        if selected_preset is not None
+        else "FEN escrito a mano"
+    )
     try:
         board = chess.Board(fen)
         fen_error = None
@@ -450,15 +480,15 @@ def _(
         mo.callout(mo.md(f"FEN inválido: {fen_error}"), kind="danger"),
     )
     mo.stop(
-        not board.has_legal_moves(),
+        not any(board.legal_moves),
         mo.callout(
             mo.md("La posición es terminal (mate o ahogado): no hay jugadas legales."),
             kind="warn",
         ),
     )
 
-    stage1_predictions = predict_top_moves(stage1_model, fen, top_k=3)
-    stage2_predictions = predict_top_moves(stage2_model, fen, top_k=3)
+    stage1_predictions = predict_top_moves(stage1_eval_model, fen, top_k=3)
+    stage2_predictions = predict_top_moves(stage2_eval_model, fen, top_k=3)
     best_move = chess.Move.from_uci(stage2_predictions[0][0])
     board_svg = chess.svg.board(
         board,
@@ -483,6 +513,7 @@ def _(
             mo.Html(str(board_svg)),
             mo.vstack(
                 [
+                    mo.md(f"**Posición:** {source} · `{fen}`"),
                     mo.md(f"**Mejor jugada del modelo ajustado:** `{best_move.uci()}`"),
                     mo.ui.table(pl.DataFrame(rows), pagination=False),
                     mo.md(
@@ -494,6 +525,11 @@ def _(
         ],
         justify="start",
     )
+    return
+
+
+@app.cell
+def _():
     return
 
 

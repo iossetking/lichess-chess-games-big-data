@@ -345,7 +345,11 @@ def _(chess, mo):
         value="Personalizado (usar el FEN de abajo)",
         label="Posición de ejemplo",
     )
-    fen_input = mo.ui.text_area(value=chess.STARTING_FEN, label="FEN escrito a mano")
+    fen_input = mo.ui.text_area(
+        value=chess.STARTING_FEN,
+        label="FEN escrito a mano",
+        debounce=500,
+    )
     mo.vstack(
         [
             mo.md("## Predicción interactiva: Maia frente al enfoque 1"),
@@ -381,7 +385,7 @@ def _(
         mo.callout(mo.md(f"FEN inválido: {fen_error}"), kind="danger"),
     )
     mo.stop(
-        not board.has_legal_moves(),
+        not any(board.legal_moves),
         mo.callout(mo.md("La posición es terminal: no hay jugadas legales."), kind="warn"),
     )
 

@@ -1,286 +1,113 @@
-"""Stage 1: read-only access to the Lichess standard-chess-games dataset.
+"""Stage 1: read-only access to the official Lichess database files.
 
-Lists months and shard files, reads a month remotely with Polars (hf:// URLs)
-or downloads it, selects columns and validates the schema. It never filters rows, cleans data or writes processed output.
+Streams `.pgn.zst` (standard games) and `.jsonl.zst` (Stockfish evaluations)
+either from ``https://database.lichess.org/`` or from a local file,
+decompressing on the fly with ``zstandard``. Nothing is parsed here beyond
+splitting PGN games into blocks: parsing and cleaning live in
+``pgn_parser.py``.
+
+Only the first N lines/games are read, so the notebooks never download a
+whole multi-gigabyte month: the HTTP stream is closed as soon as enough data
+has been consumed.
 """
 
-import re
-import time
-from collections.abc import Callable, Mapping, Sequence
+from __future__ import annotations
+
+import io
+import urllib.request
+import zstandard as zstd
+from collections.abc import Iterator
 from pathlib import Path
 
-import polars as pl
-from huggingface_hub import HfApi, hf_hub_download
-from huggingface_hub.errors import HfHubHTTPError
-
-REPOSITORY_ID = "Lichess/standard-chess-games"
-REPOSITORY_REVISION = "de4e636eddf568a9394cc01fb0b9e1da04a6babf"
-REPOSITORY_REVISION_DATE = "2025-10-16"
-
-# Revisions below were read from `HfApi().dataset_info(repo).sha` on 2026-10-27.
-EVALUATIONS_REPO_ID = "Lichess/chess-position-evaluations"
-EVALUATIONS_REVISION = "8c5285259fdbf3218bf2582de9775dd1378f520b"
-EVALUATIONS_REVISION_DATE = "2026-10-27"
-EVALUATIONS_SCHEMA: dict[str, pl.DataType] = {
-    "fen": pl.String(),
-    "line": pl.String(),
-    "depth": pl.UInt8(),
-    "knodes": pl.Int32(),
-    "cp": pl.Int16(),
-    "mate": pl.Int8(),
-}
-
-PUZZLES_REPO_ID = "Lichess/chess-puzzles"
-PUZZLES_REVISION = "461725966ea46898ec6481372a6326de3281bfbd"
-PUZZLES_REVISION_DATE = "2026-10-27"
-PUZZLES_SCHEMA: dict[str, pl.DataType] = {
-    "PuzzleId": pl.String(),
-    "GameId": pl.String(),
-    "FEN": pl.String(),
-    "Moves": pl.String(),
-    "Rating": pl.UInt16(),
-    "RatingDeviation": pl.UInt16(),
-    "Popularity": pl.Int8(),
-    "NbPlays": pl.UInt32(),
-    "Themes": pl.List(pl.String()),
-    "OpeningTags": pl.List(pl.String()),
-}
-
-EXPECTED_SCHEMA: dict[str, pl.DataType] = {
-    "Event": pl.String(),
-    "Site": pl.String(),
-    "White": pl.String(),
-    "Black": pl.String(),
-    "Result": pl.String(),
-    "WhiteTitle": pl.String(),
-    "BlackTitle": pl.String(),
-    "WhiteElo": pl.Int16(),
-    "BlackElo": pl.Int16(),
-    "WhiteRatingDiff": pl.Int16(),
-    "BlackRatingDiff": pl.Int16(),
-    "UTCDate": pl.Date(),
-    "UTCTime": pl.Time(),
-    "ECO": pl.String(),
-    "Opening": pl.String(),
-    "Termination": pl.String(),
-    "TimeControl": pl.String(),
-    "movetext": pl.String(),
-}
-
-DEFAULT_COLUMNS: list[str] = [
-    "Site",
-    "Result",
-    "WhiteElo",
-    "BlackElo",
-    "WhiteTitle",
-    "BlackTitle",
-    "TimeControl",
-    "Termination",
-    "Event",
-    "ECO",
-    "Opening",
-    "UTCDate",
-    "UTCTime",
-    "movetext",
-]
-
-_PARTITION_RE = re.compile(r"^data/year=(\d{4})/month=(\d{2})/[^/]+\.parquet$")
+OFFICIAL_GAMES_URL_TEMPLATE = (
+    "https://database.lichess.org/standard/"
+    "lichess_db_standard_rated_{year:04d}-{month:02d}.pgn.zst"
+)
+OFFICIAL_EVALS_URL = "https://database.lichess.org/lichess_db_eval.jsonl.zst"
+PGN_RESULT_TOKENS = ("1-0", "0-1", "1/2-1/2")
+DOWNLOAD_CHUNK_BYTES = 1 << 20
 
 
-def parse_month_partitions(files: Sequence[str]) -> list[str]:
-    """Return the sorted unique "YYYY-MM" months found in repo file paths."""
-    months = {
-        f"{m.group(1)}-{m.group(2)}" for f in files if (m := _PARTITION_RE.match(f))
-    }
-    return sorted(months)
+def games_month_url(year: int, month: int) -> str:
+    """URL of one month of official standard rated games (``.pgn.zst``)."""
+    return OFFICIAL_GAMES_URL_TEMPLATE.format(year=year, month=month)
 
 
-def month_shard_files(files: Sequence[str], year: int, month: int) -> list[str]:
-    """Return the sorted parquet shard paths of one month (any shard count)."""
-    prefix = f"data/year={year:04d}/month={month:02d}/"
-    return sorted(f for f in files if f.startswith(prefix) and _PARTITION_RE.match(f))
+def is_remote(source: str | Path) -> bool:
+    """True when ``source`` is an HTTP(S) URL instead of a local path."""
+    return str(source).startswith(("http://", "https://"))
 
 
-def list_repo_parquet_files(
-    revision: str = REPOSITORY_REVISION, api: HfApi | None = None
-) -> list[str]:
-    """List parquet files of the dataset at a pinned revision (one API call)."""
-    api = api or HfApi()
-    files = api.list_repo_files(REPOSITORY_ID, repo_type="dataset", revision=revision)
-    return [f for f in files if f.endswith(".parquet")]
+def _open_binary(source: str | Path) -> io.IOBase:
+    if is_remote(source):
+        return urllib.request.urlopen(str(source), timeout=60)  # noqa: S310
+    return open(source, "rb")  # noqa: SIM115
 
 
-def remote_month_urls(
-    year: int,
-    month: int,
-    revision: str = REPOSITORY_REVISION,
-    files: Sequence[str] | None = None,
-) -> list[str]:
-    """hf:// URLs of a month's shards, pinned to `revision`, for remote Polars reads."""
-    if files is None:
-        files = list_repo_parquet_files(revision)
-    shards = month_shard_files(files, year, month)
-    if not shards:
-        raise ValueError(f"No shards found for {year:04d}-{month:02d}.")
-    return [f"hf://datasets/{REPOSITORY_ID}@{revision}/{shard}" for shard in shards]
+def stream_zst_lines(source: str | Path, max_lines: int | None = None) -> Iterator[str]:
+    """Yield decompressed UTF-8 lines from a local ``.zst`` file or an URL.
 
-
-def month_download_size(
-    year: int,
-    month: int,
-    revision: str = REPOSITORY_REVISION,
-    files: Sequence[str] | None = None,
-    api: HfApi | None = None,
-) -> int:
-    """Total bytes of a month's shards. Pass `files` to avoid re-listing."""
-    api = api or HfApi()
-    if files is None:
-        files = list_repo_parquet_files(revision, api)
-    shards = month_shard_files(files, year, month)
-    if not shards:
-        raise ValueError(f"No shards found for {year:04d}-{month:02d}.")
-    infos = api.get_paths_info(
-        REPOSITORY_ID, shards, repo_type="dataset", revision=revision
-    )
-    return sum(info.size for info in infos)
-
-
-def _rate_limit_delay(error: Exception) -> float | None:
-    """Return the Retry-After seconds for an HTTP 429 (0.0 if absent), else None."""
-    if not isinstance(error, HfHubHTTPError) or error.response is None:
-        return None
-    if error.response.status_code != 429:
-        return None
+    Stops after ``max_lines`` lines and closes the underlying stream, which is
+    what keeps a sample read from downloading the whole file. A truncated
+    stream (or one closed on purpose mid-frame) ends the iteration quietly.
+    """
+    if max_lines is not None and max_lines <= 0:
+        raise ValueError("max_lines must be positive or None")
+    raw = _open_binary(source)
+    reader = zstd.ZstdDecompressor().stream_reader(raw, closefd=True)
+    text = io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
     try:
-        return float(error.response.headers.get("Retry-After", 0))
-    except ValueError:
-        return 0.0
+        for count, line in enumerate(text, start=1):
+            yield line.rstrip("\r\n")
+            if max_lines is not None and count >= max_lines:
+                return
+    except (zstd.ZstdError, EOFError):
+        return
+    finally:
+        text.close()
 
 
-def _download_with_retry(
-    filename: str,
-    cache_dir: Path,
-    revision: str,
-    max_retries: int,
-    base_delay: float,
-    downloader: Callable[..., str],
-    sleep: Callable[[float], None],
-) -> str:
-    for attempt in range(max_retries + 1):
-        try:
-            return downloader(
-                repo_id=REPOSITORY_ID,
-                filename=filename,
-                repo_type="dataset",
-                revision=revision,
-                cache_dir=cache_dir,
-            )
-        except Exception as error:
-            retry_after = _rate_limit_delay(error)
-            if retry_after is None or attempt == max_retries:
-                raise
-            sleep(max(base_delay * 2**attempt, retry_after))
-    raise AssertionError("unreachable")
+def stream_pgn_blocks(source: str | Path, max_games: int) -> Iterator[str]:
+    """Yield complete PGN game blocks (headers plus movetext) up to ``max_games``.
 
-
-def download_month(
-    year: int,
-    month: int,
-    cache_dir: Path,
-    revision: str = REPOSITORY_REVISION,
-    files: Sequence[str] | None = None,
-    max_retries: int = 5,
-    base_delay: float = 2.0,
-    downloader: Callable[..., str] = hf_hub_download,
-    sleep: Callable[[float], None] = time.sleep,
-) -> list[Path]:
-    """Download all shards of a month into `cache_dir`.
-
-    Retries with exponential backoff only on HTTP 429 (honouring Retry-After);
-    other errors propagate. The auth token comes from the local Hugging Face
-    login, never from the repo.
+    A game ends at a non-header line finishing with one of the three PGN result
+    tokens. Blank lines are dropped. The trailing token lets black's ``1...``
+    move numbers and ``{ [%clk ...] }`` comments pass through untouched; the
+    parser strips them.
     """
-    if files is None:
-        files = list_repo_parquet_files(revision)
-    shards = month_shard_files(files, year, month)
-    if not shards:
-        raise ValueError(f"No shards found for {year:04d}-{month:02d}.")
-    return [
-        Path(
-            _download_with_retry(
-                filename,
-                cache_dir,
-                revision,
-                max_retries,
-                base_delay,
-                downloader,
-                sleep,
-            )
-        )
-        for filename in shards
-    ]
+    if max_games <= 0:
+        raise ValueError("max_games must be positive")
+    buffer: list[str] = []
+    emitted = 0
+    for line in stream_zst_lines(source):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        buffer.append(stripped)
+        if stripped.startswith("[") or not stripped.endswith(PGN_RESULT_TOKENS):
+            continue
+        yield "\n".join(buffer)
+        buffer = []
+        emitted += 1
+        if emitted >= max_games:
+            return
 
 
-def validate_schema(
-    schema: pl.Schema,
-    columns: Sequence[str],
-    expected_schema: Mapping[str, pl.DataType] | None = None,
-) -> None:
-    """Raise ValueError listing missing columns and dtype mismatches.
+def download_to_disk(url: str, dest_path: Path, max_bytes: int | None = None) -> Path:
+    """Copy ``url`` to ``dest_path``, optionally stopping after ``max_bytes``.
 
-    `expected_schema` defaults to the games schema.
+    Used when the notebook is asked to keep a local sample in ``data/raw/``;
+    ``max_bytes`` keeps the download bounded even for a monthly PGN archive.
     """
-    expected = EXPECTED_SCHEMA if expected_schema is None else expected_schema
-    missing: list[str] = []
-    mismatched: list[str] = []
-    for name in columns:
-        if name not in schema:
-            missing.append(name)
-        elif name in expected and schema[name] != expected[name]:
-            mismatched.append(f"{name}: expected {expected[name]}, got {schema[name]}")
-    if missing or mismatched:
-        parts = []
-        if missing:
-            parts.append(f"missing columns: {missing}")
-        if mismatched:
-            parts.append(f"dtype mismatches: {mismatched}")
-        raise ValueError("Schema validation failed; " + "; ".join(parts))
-
-
-def scan_hf_dataset(
-    repo_id: str,
-    files: Sequence[str],
-    revision: str,
-    columns: Sequence[str],
-    expected_schema: Mapping[str, pl.DataType],
-) -> pl.LazyFrame:
-    """Lazily scan repo files via hf:// URLs pinned to `revision`.
-
-    Validates the requested columns against `expected_schema` and returns only
-    those columns. Nothing is read until `collect`.
-    """
-    if not files:
-        raise ValueError("No files given.")
-    unknown = [c for c in columns if c not in expected_schema]
-    if unknown:
-        raise ValueError(f"Unknown columns requested: {unknown}")
-    urls = [f"hf://datasets/{repo_id}@{revision}/{f}" for f in files]
-    lazy = pl.scan_parquet(urls, hive_partitioning=False)
-    validate_schema(lazy.collect_schema(), columns, expected_schema)
-    return lazy.select(list(columns))
-
-
-def scan_month(
-    paths: Sequence[Path | str], columns: Sequence[str] = DEFAULT_COLUMNS
-) -> pl.LazyFrame:
-    """Lazily scan local paths or hf:// URLs, validate and select columns.
-
-    Remote reads only fetch what a query needs (footers, chosen columns), but
-    every collect goes over the network again.
-    """
-    unknown = [c for c in columns if c not in EXPECTED_SCHEMA]
-    if unknown:
-        raise ValueError(f"Unknown columns requested: {unknown}")
-    lazy = pl.scan_parquet([str(p) for p in paths], hive_partitioning=False)
-    validate_schema(lazy.collect_schema(), columns)
-    return lazy.select(list(columns))
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with urllib.request.urlopen(url, timeout=60) as response, dest_path.open("wb") as out:  # noqa: S310
+        while max_bytes is None or written < max_bytes:
+            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            if max_bytes is not None:
+                chunk = chunk[: max_bytes - written]
+            out.write(chunk)
+            written += len(chunk)
+    return dest_path

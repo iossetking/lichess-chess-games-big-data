@@ -6,15 +6,13 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "chess>=1.11.2",
-    "datasets>=5.1.0",
-    "duckdb>=1.5.6",
-    "huggingface-hub>=2.2.0",
     "marimo>=0.25.2",
     "matplotlib>=3.11.2",
     "numpy>=2.0",
     "opencv-contrib-python>=4.11",
-    "pandas>=3.0.6",
     "polars>=2.0.0",
+    "torch>=2.6.0",
+    "zstandard>=0.23.0",
 ]
 
 [dependency-groups]

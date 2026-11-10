@@ -5,6 +5,7 @@ from lichess_pipeline.chess_vision import (
     board_destination,
     marker_centers_by_corner,
     square_regions,
+    validate_ordered_board_corners,
 )
 
 
@@ -36,3 +37,13 @@ def test_marker_centers_follow_explicit_marker_order():
         [[1, 1], [9, 1], [9, 9], [1, 9]],
     )
     assert marker_centers_by_corner({10: markers[10]}, (10, 11, 12, 13)) is None
+
+
+def test_validate_ordered_board_corners_accepts_a_convex_board():
+    corners = validate_ordered_board_corners(np.array([[10, 10], [90, 20], [80, 90], [15, 80]]))
+    np.testing.assert_array_equal(corners, [[10, 10], [90, 20], [80, 90], [15, 80]])
+
+
+def test_validate_ordered_board_corners_rejects_crossed_click_order():
+    with pytest.raises(ValueError, match="convex"):
+        validate_ordered_board_corners(np.array([[10, 10], [80, 90], [90, 20], [15, 80]]))

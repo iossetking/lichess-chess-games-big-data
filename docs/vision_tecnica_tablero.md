@@ -324,6 +324,36 @@ uv run python -m pytest -q
 
 En la implementación actual pasaron 38 pruebas.
 
+## 13. Caso adicional: foto tomada con celular sin ArUco
+
+Una foto de celular normalmente no incluye los cuatro marcadores ArUco. Por
+eso la demo en vivo no puede rectificarla por sí sola: no hay referencias que
+identifiquen las esquinas. Para ese caso existe
+`scripts/chessboard_photo_demo.py`.
+
+El usuario carga la foto y hace clic en los cuatro vértices **internos** de la
+cuadrícula 8×8, en el orden `a8`, `h8`, `h1`, `a1`. No debe seleccionar el
+borde decorativo de madera ni la sombra exterior del tablero. Con esos cuatro
+puntos el programa aplica exactamente la misma homografía de la cámara y crea
+un PNG rectificado con sus 64 regiones.
+
+```bash
+uv run python scripts/chessboard_photo_demo.py --image /ruta/a/tablero.jpg
+```
+
+El modo manual es deliberado: en fotos con piezas, reflejos y texturas no hay
+una detección automática de contorno que sea fiable para todos los tableros.
+Pedir cuatro clics elimina ese punto de fallo y permite validar de inmediato la
+segmentación. Si la orientación elegida es correcta, la imagen resultante tiene
+`a8` en la esquina superior izquierda y `h1` en la inferior derecha.
+
+El mismo método está disponible para la webcam con
+`uv run python scripts/chessboard_camera_demo.py --manual-corners`. Es útil al
+mostrar una imagen de referencia en la pantalla de un celular: se pulsa `c`,
+se seleccionan los cuatro puntos y la cuadrícula se mantiene mientras la cámara
+y el celular no cambien de posición. Si cambian, se vuelve a pulsar `c` para
+recalibrar.
+
 ## 12. Respuestas breves para una presentación
 
 **¿Qué problema resuelve?** Convierte el tablero físico visto por cámara en una

@@ -232,3 +232,79 @@ Después de entrenar un clasificador con las clases `empty`, `white_pawn`, ...,
 `black_king`, reemplaza el cuerpo de `classify_square` en
 `src/lichess_pipeline/chess_vision.py`. Cada imagen recibida por esa función
 es ya un recorte normalizado de una casilla del tablero rectificado.
+
+### Detección en vivo: cajas y confianza
+
+La aplicación de reconocimiento muestra cajas con el tipo y la confianza del
+modelo (`peon 92%`), sin cuadrícula ni relleno de máscaras. Detecta sobre el
+fotograma original, incluso si todavía no encuentra el tablero; así evita
+aplanar las siluetas de piezas físicas antes de reconocerlas.
+
+```bash
+uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt --scene 3d --device mps
+```
+
+Para imágenes o pantallas usa `--scene 2d`. Esta opción cambia el punto que se
+asigna a una casilla: centro de la caja en 2D, base en 3D. No cambia el modelo.
+El reconocimiento no filtra por color del tablero; `--screen-board` es una
+opción específica para el antiguo tablero verde y crema y no es necesaria.
+La captura descarta fotogramas viejos y la inferencia procesa cada captura una
+sola vez. La ventana muestra FPS, tiempo desde la captura hasta el resultado
+en ms y antigüedad del resultado. Esta medida no incluye la latencia interna
+de la cámara ni el tiempo de presentación en pantalla.
+
+Se admiten modelos de seis clases (`pawn`, `knight`, `bishop`, `rook`, `queen`,
+`king`) para reconocer tipos sin asignar bando. Para exportar y entrenar con
+esas clases a partir del conjunto de 12 clases:
+
+```bash
+uv run python scripts/train_chess_piece_yolo.py --shape-only --device mps
+```
+
+Esto genera `data/models/chess-piece-shapes.pt`. También se puede entrenar con
+un conjunto YOLO propio mediante `--data-yaml /ruta/data.yaml`, con fotos 3D e
+imágenes 2D etiquetadas con las mismas clases. Hay que incluir distintos juegos,
+colores, perspectivas, luces y fondos, y evaluar cada dominio con imágenes no
+usadas en entrenamiento. Los pesos existentes no garantizan esa generalización.
+La confianza mostrada es la puntuación del detector, no una tasa de acierto
+medida. Con seis clases no se publica FEN porque falta identificar el bando.
+
+### Entrenamiento mixto con los datos locales
+
+```bash
+uv run python scripts/train_mixed_chess_shapes.py --epochs 30 --imgsz 512 --batch 8 --device mps
+```
+
+Combina `chess-pieces-merged` y `screen-chess-seg` de `data/vision`; excluye
+`chess-pieces-roboflow` porque su exportación local tiene etiquetas vacías aun
+cuando las imágenes muestran piezas. Convierte las máscaras
+2D a cajas y unifica blancas/negras en seis tipos. Reserva los splits de prueba
+y validación originales, elimina duplicados exactos por píxeles y añade ejemplos
+en grises en entrenamiento. Continúa desde `chess-piece-shapes-initial.pt`
+(copia de los pesos anteriores; si no existen, usa `chess-pieces.pt`).
+El entrenamiento aplica variaciones de tono,
+saturación, brillo, escala y perspectiva. Guarda el mejor checkpoint como
+`data/models/chess-piece-shapes.pt`, evalúa los tests 2D y 3D por separado y
+escribe métricas y mediciones de inferencia en
+`data/models/chess-piece-shapes-report.json`.
+
+```bash
+uv run python scripts/live_chess_fen.py --weights data/models/chess-piece-shapes.pt --scene 3d --device mps --imgsz 512
+```
+
+Cambia a `--scene 2d` para pantallas. El modelo reconoce tipos; no reconstruye
+el bando para FEN. El conjunto sintético usa un solo estilo de sprites y los
+conjuntos físicos contienen diseños similares: las métricas describen estos
+conjuntos, no todos los estilos posibles. Los duplicados aproximados entre
+fuentes tampoco quedan descartados por la comparación exacta de píxeles.
+
+Para repetir la prueba de sensibilidad al color sobre las imágenes de test:
+
+```bash
+uv run python scripts/evaluate_chess_appearance.py --device mps --imgsz 512
+```
+
+Genera copias en grises y con el tono desplazado, y evalúa ambos dominios.
+Guarda los resultados en `data/models/chess-piece-shapes-appearance-report.json`.
+Esta prueba conserva la geometría: no representa diseños, materiales o
+condiciones de iluminación nuevos.

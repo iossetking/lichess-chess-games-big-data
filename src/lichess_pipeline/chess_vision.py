@@ -98,11 +98,14 @@ def detect_board_corners(frame: np.ndarray) -> np.ndarray | None:
     if frame.ndim not in {2, 3}:
         raise ValueError("frame must be a grayscale or colour image")
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-    flags = cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
+    scale = min(1.0, 640 / max(gray.shape[:2]))
+    if scale < 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale)
+    flags = cv2.CALIB_CB_NORMALIZE_IMAGE
     found, corners = cv2.findChessboardCornersSB(gray, (7, 7), flags)
     if not found or corners is None:
         return None
-    return extrapolate_board_corners(corners)
+    return extrapolate_board_corners(corners / scale)
 
 
 def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
@@ -172,7 +175,9 @@ def piece_description_from_label(label: str) -> str | None:
     """Return a concise Spanish description such as ``"peón negro"``."""
     symbol = piece_symbol_from_label(label)
     if symbol is None:
-        return None
+        shape_names = {"pawn": "peón", "knight": "caballo", "bishop": "alfil",
+                       "rook": "torre", "queen": "dama", "king": "rey"}
+        return shape_names.get(label.lower().strip())
     names = {"p": "peón", "n": "caballo", "b": "alfil", "r": "torre", "q": "dama", "k": "rey"}
     colour = "blanco" if symbol.isupper() else "negro"
     return f"{names[symbol.lower()]} {colour}"

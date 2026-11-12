@@ -4,8 +4,8 @@ Example:
     uv run python scripts/live_chess_fen.py \
       --weights data/models/chess-pieces.pt --move-model data/models/approach1_stage2_finetuned.pt
 
-The piece checkpoint must have one class for each coloured chess piece (for
-example ``w-pawn`` and ``b-king``).  An ordinary COCO YOLO checkpoint cannot
+The piece checkpoint may use six shape classes (pawn, knight, bishop, rook,
+queen, king) or twelve coloured classes. FEN requires coloured classes.  An ordinary COCO YOLO checkpoint cannot
 recognise chess pieces.
 """
 
@@ -36,13 +36,12 @@ from lichess_pipeline.chess_vision import (
     detections_to_fen,
     piece_description_from_label,
     piece_symbol_from_label,
-    square_regions,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--weights", type=Path, required=True, help="YOLO .pt/.onnx trained on the 12 chess pieces")
+    parser.add_argument("--weights", type=Path, required=True, help="YOLO .pt/.onnx trained on six piece shapes or twelve coloured pieces")
     parser.add_argument("--board-weights", type=Path, help="Optional YOLO-seg model with a chessboard/board class")
     parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0)")
     parser.add_argument("--size", type=int, default=DEFAULT_BOARD_SIZE, help="Rectified board side in pixels")
@@ -53,6 +52,8 @@ def parse_args() -> argparse.Namespace:
         help="Require a YOLO-seg checkpoint with one pixel mask per piece",
     )
     parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference image size")
+    parser.add_argument("--device", default=None, help="Inference device: cpu, mps or 0 (automatic if omitted)")
+    parser.add_argument("--scene", choices=("2d", "3d"), default="2d", help="Use box centre for 2D, base for physical 3D pieces")
     parser.add_argument("--screen-board", action="store_true", help="Fast green/cream 2D screen board detection")
     parser.add_argument(
         "--redetect-every",
@@ -73,16 +74,17 @@ def parse_args() -> argparse.Namespace:
 class YoloPieceDetector:
     """Small adapter that avoids tying core vision code to Ultralytics types."""
 
-    def __init__(self, weights: Path) -> None:
+    def __init__(self, weights: Path, device: str | None = None) -> None:
         try:
             from ultralytics import YOLO
         except ImportError as error:
             raise RuntimeError("Falta Ultralytics. Ejecuta: uv add ultralytics") from error
         self.model = YOLO(weights)
+        self.device = device
         self.is_segmentation = self.model.task == "segment"
 
     def detect(self, image: np.ndarray, confidence: float, imgsz: int) -> list[PieceDetection]:
-        result = self.model.predict(image, conf=confidence, imgsz=imgsz, verbose=False)[0]
+        result = self.model.predict(image, conf=confidence, imgsz=imgsz, device=self.device, verbose=False)[0]
         if result.boxes is None:
             return []
         names: dict[int, str] = result.names
@@ -110,6 +112,8 @@ class LatestFrameCamera:
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._lock = Lock()
         self._frame: np.ndarray | None = None
+        self._sequence = 0
+        self._captured_at = 0.0
         self._stopped = Event()
         self._thread: Thread | None = None
 
@@ -126,12 +130,19 @@ class LatestFrameCamera:
             if ok:
                 with self._lock:
                     self._frame = frame
+                    self._sequence += 1
+                    self._captured_at = perf_counter()
             else:
                 sleep(0.01)
 
     def latest(self) -> np.ndarray | None:
         with self._lock:
             return None if self._frame is None else self._frame.copy()
+
+    def sample(self) -> tuple[np.ndarray | None, int, float]:
+        with self._lock:
+            return (None if self._frame is None else self._frame.copy(),
+                    self._sequence, self._captured_at)
 
     def release(self) -> None:
         self._stopped.set()
@@ -155,6 +166,7 @@ class LiveInference:
         self.move = ""
         self.inference_fps = 0.0
         self.last_result_at = 0.0
+        self.latency_ms = 0.0
         self.turn, self.flip = args.turn, args.flip
         self.generation = 0
 
@@ -177,28 +189,34 @@ class LiveInference:
                 self.turn = "b" if self.turn == "w" else "w"
             self.generation += 1
 
-    def snapshot(self) -> tuple[np.ndarray | None, np.ndarray | None, str, str, float, float]:
+    def snapshot(self) -> tuple[np.ndarray | None, np.ndarray | None, str, str, float, float, float]:
         with self._lock:
             return (None if self.corners is None else self.corners.copy(),
                     None if self.board_image is None else self.board_image.copy(),
-                    self.fen, self.move, self.inference_fps, self.last_result_at)
+                    self.fen, self.move, self.inference_fps, self.last_result_at, self.latency_ms)
 
     def _run(self) -> None:
         destination = board_destination(self.args.size)
-        regions = square_regions(self.args.size)
         stabilizer = FenStabilizer(self.args.stable_frames)
         processed = 0
+        last_sequence = -1
+        next_board_search = 0.0
         while not self._stop.is_set():
-            frame = self.camera.latest()
-            if frame is None:
+            frame, sequence, captured_at = self.camera.sample()
+            if frame is None or sequence == last_sequence:
                 sleep(0.01)
                 continue
+            last_sequence = sequence
             started = perf_counter()
+            detections = self.pieces.detect(frame, self.args.confidence, self.args.imgsz)
+            annotated = frame.copy()
+            draw_detections(annotated, detections)
             with self._lock:
                 corners = None if self.corners is None else self.corners.copy()
                 generation, turn, flip = self.generation, self.turn, self.flip
             redetect = corners is None or (self.args.redetect_every > 0 and processed % self.args.redetect_every == 0)
-            if redetect:
+            if redetect and started >= next_board_search:
+                next_board_search = started + 1.0
                 found = detect_green_screen_board(frame) if self.args.screen_board else None
                 if found is None:
                     found = detect_board_corners(frame)
@@ -206,17 +224,23 @@ class LiveInference:
                     found = self.board_segmenter.detect(frame, self.args.confidence, self.args.imgsz)
                 if found is not None:
                     corners = found
-            if corners is None:
-                sleep(0.01)
-                continue
-            board = cv2.warpPerspective(frame, cv2.getPerspectiveTransform(corners, destination),
-                                        (self.args.size, self.args.size))
-            if flip:
-                board = cv2.rotate(board, cv2.ROTATE_180)
-            detections = self.pieces.detect(board, self.args.confidence, self.args.imgsz)
-            fen = detections_to_fen(detections, self.args.size, turn=turn,
+            mapped = []
+            if corners is not None:
+                transform = cv2.getPerspectiveTransform(corners, destination)
+                for detection in detections:
+                    x1, y1, x2, y2 = detection.xyxy
+                    anchor = np.array([[[(x1 + x2) / 2,
+                                         y2 if self.args.scene == "3d" else (y1 + y2) / 2]]], dtype=np.float32)
+                    x, y = cv2.perspectiveTransform(anchor, transform)[0, 0]
+                    if flip:
+                        x, y = self.args.size - 1 - x, self.args.size - 1 - y
+                    mapped.append(PieceDetection(detection.label, detection.confidence,
+                                                 (float(x), float(y), float(x), float(y))))
+            # Six-class shape models cannot identify allegiance for FEN.
+            can_publish = corners is not None and bool(detections) and all(piece_symbol_from_label(d.label) is not None for d in detections)
+            fen = detections_to_fen(mapped, self.args.size, turn=turn,
                                     castling=self.args.castling, en_passant=self.args.en_passant)
-            published = stabilizer.update(fen)
+            published = stabilizer.update(fen) if can_publish else None
             move = None
             if published is not None and self.policy is not None:
                 import chess
@@ -228,14 +252,17 @@ class LiveInference:
                     move = f"Best move: {moves[0][0]} ({moves[0][1]:.1%})" if moves else "No legal move"
                 else:
                     move = "FEN invalid: verify detections/context"
-            draw_grid(board, regions)
-            draw_detections(board, detections)
             elapsed = max(perf_counter() - started, 1e-6)
             with self._lock:
                 if generation != self.generation:
                     stabilizer = FenStabilizer(self.args.stable_frames)
                     continue
-                self.corners, self.board_image = corners, board
+                self.corners, self.board_image = corners, annotated
+                self.latency_ms = (perf_counter() - captured_at) * 1000
+                if not can_publish:
+                    self.fen = "FEN needs board + coloured piece labels"
+                    self.move = ""
+                    stabilizer = FenStabilizer(self.args.stable_frames)
                 if published is not None:
                     self.fen = published
                     if move is not None:
@@ -287,32 +314,25 @@ def order_corners(points: np.ndarray) -> np.ndarray:
     )
 
 
-def draw_grid(image: np.ndarray, regions: dict[str, tuple[int, int, int, int]]) -> None:
-    for name, (x1, y1, x2, y2) in regions.items():
-        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 220, 0), 1)
-        cv2.putText(image, name, (x1 + 4, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 0), 1)
-
-
 def draw_detections(image: np.ndarray, detections: list[PieceDetection]) -> None:
-    """Draw type/colour-labelled boxes and real masks from a YOLO-seg model."""
-    mask_overlay = image.copy()
-    has_masks = False
+    """Draw shape labels and model confidence, without grids or mask fills."""
+    height, width = image.shape[:2]
     for detection in detections:
-        symbol = piece_symbol_from_label(detection.label)
-        colour = (255, 220, 0) if symbol is not None and symbol.isupper() else (0, 70, 255)
-        if detection.mask is not None and len(detection.mask) >= 3:
-            cv2.fillPoly(mask_overlay, [detection.mask.reshape(-1, 1, 2)], colour)
-            has_masks = True
-    if has_masks:
-        cv2.addWeighted(mask_overlay, 0.35, image, 0.65, 0, dst=image)
-    for detection in detections:
-        symbol = piece_symbol_from_label(detection.label)
-        colour = (255, 220, 0) if symbol is not None and symbol.isupper() else (0, 70, 255)
+        colour = (0, 220, 80)
         x1, y1, x2, y2 = (round(value) for value in detection.xyxy)
+        x1, x2 = max(0, min(width - 1, x1)), max(0, min(width - 1, x2))
+        y1, y2 = max(0, min(height - 1, y1)), max(0, min(height - 1, y2))
         cv2.rectangle(image, (x1, y1), (x2, y2), colour, 2)
         description = piece_description_from_label(detection.label) or detection.label
-        cv2.putText(image, f"{description} {detection.confidence:.2f}", (x1, max(18, y1 - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1)
+        description = description.removesuffix(" blanco").removesuffix(" negro")
+        # OpenCV's built-in font does not support accented characters.
+        description = description.replace("ó", "o")
+        text = f"{description} {detection.confidence:.0%}"
+        (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        left = max(0, min(x1, width - tw - 6))
+        bottom = min(height - baseline - 1, max(th + 6, y1))
+        cv2.rectangle(image, (left, bottom - th - 6), (min(width - 1, left + tw + 6), bottom + baseline), colour, -1)
+        cv2.putText(image, text, (left + 3, bottom - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
 
 def load_policy(path: Path, architecture: str) -> Any:
@@ -344,7 +364,7 @@ def main() -> int:
         return 2
 
     try:
-        pieces = YoloPieceDetector(args.weights)
+        pieces = YoloPieceDetector(args.weights, args.device)
         if args.require_segmentation and not pieces.is_segmentation:
             raise RuntimeError("--require-segmentation needs YOLO-seg weights, not a detection checkpoint")
         board_segmenter = YoloBoardSegmenter(args.board_weights) if args.board_weights else None
@@ -368,17 +388,17 @@ def main() -> int:
             if frame is None:
                 cv2.waitKey(1)
                 continue
-            corners, board, visible_fen, visible_move, inference_fps, updated_at = inference.snapshot()
+            corners, board, visible_fen, visible_move, inference_fps, updated_at, latency_ms = inference.snapshot()
             preview = frame.copy()
             if corners is None:
                 cv2.putText(preview, "Looking for 8x8 board grid", (20, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             else:
                 cv2.polylines(preview, [corners.astype(np.int32)], True, (0, 255, 0), 3)
             if board is not None:
-                cv2.imshow("Board + YOLO pieces", board)
+                cv2.imshow("Pieces | boxes + confidence", board)
             age = perf_counter() - updated_at if updated_at else 0.0
             geometry = "locked" if corners is not None else "searching"
-            cv2.putText(preview, f"CAM LIVE | YOLO {inference_fps:.1f} FPS | result {age:.1f}s old | board {geometry}", (20, 36),
+            cv2.putText(preview, f"CAM LIVE | YOLO {inference_fps:.1f} FPS | {latency_ms:.0f} ms | result {age:.1f}s old | board {geometry}", (20, 36),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
             cv2.putText(preview, visible_fen, (20, max(36, preview.shape[0] - 50)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 2)
             if visible_move:

@@ -43,6 +43,8 @@ SPLITS = {"train": "train", "valid": "valid", "test": "test"}
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-yaml", type=Path, help="Use an existing YOLO dataset, including mixed 2D/3D images")
+    parser.add_argument("--shape-only", action="store_true", help="Export six piece types, merging white and black labels")
     parser.add_argument("--dataset", default=DATASET_ID, help="Hugging Face dataset identifier")
     parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data" / "vision" / "chess-pieces-merged")
     parser.add_argument("--epochs", type=int, default=50)
@@ -68,9 +70,12 @@ def _normalise(value: float, dimension: int) -> float:
 
 
 def export_yolo_dataset(
-    dataset_id: str, destination: Path, force: bool = False, include_empty: bool = False
+    dataset_id: str, destination: Path, force: bool = False, include_empty: bool = False,
+    shape_only: bool = False
 ) -> Path:
     """Download the public dataset and materialise its images/labels in YOLO layout."""
+    if shape_only:
+        destination = destination / "shape-only"
     data_yaml = destination / "data.yaml"
     if data_yaml.exists() and not force:
         return data_yaml
@@ -104,7 +109,7 @@ def export_yolo_dataset(
             image_path = image_dir / f"{written:06}.jpg"
             image.save(image_path, quality=95)
             labels = [
-                f"{int(class_id)} {_normalise(float(x_center), image.width):.8f} "
+                f"{int(class_id) % 6 if shape_only else int(class_id)} {_normalise(float(x_center), image.width):.8f} "
                 f"{_normalise(float(y_center), image.height):.8f} "
                 f"{_normalise(float(width), image.width):.8f} "
                 f"{_normalise(float(height), image.height):.8f}"
@@ -117,7 +122,8 @@ def export_yolo_dataset(
         if written == 0:
             raise ValueError(f"No annotated images were exported for split {source_split!r}")
 
-    names = "\n".join(f"  {index}: {name}" for index, name in enumerate(CLASS_NAMES))
+    class_names = tuple(name.removeprefix("black-") for name in CLASS_NAMES[:6]) if shape_only else CLASS_NAMES
+    names = "\n".join(f"  {index}: {name}" for index, name in enumerate(class_names))
     data_yaml.write_text(
         f"path: {destination}\ntrain: train/images\nval: valid/images\ntest: test/images\nnames:\n{names}\n",
         encoding="utf-8",
@@ -130,9 +136,16 @@ def main() -> int:
     if args.epochs < 1 or args.imgsz < 32 or args.batch < 1:
         print("--epochs, --imgsz and --batch must be positive", file=sys.stderr)
         return 2
-    data_yaml = export_yolo_dataset(
-        args.dataset, args.data_dir, force=args.force_export, include_empty=args.include_empty
+    if args.data_yaml and args.shape_only:
+        print("Use six-class labels in --data-yaml; --shape-only applies to exported datasets", file=sys.stderr)
+        return 2
+    data_yaml = args.data_yaml or export_yolo_dataset(
+        args.dataset, args.data_dir, force=args.force_export, include_empty=args.include_empty,
+        shape_only=args.shape_only,
     )
+    if not data_yaml.is_file():
+        print(f"Dataset configuration not found: {data_yaml}", file=sys.stderr)
+        return 2
     print(f"YOLO dataset ready: {data_yaml}")
     if args.download_only:
         return 0
@@ -156,7 +169,7 @@ def main() -> int:
     best = Path(results.save_dir) / "weights" / "best.pt"
     if not best.is_file():
         raise RuntimeError(f"Ultralytics did not produce {best}")
-    output = PROJECT_ROOT / "data" / "models" / "chess-pieces.pt"
+    output = PROJECT_ROOT / "data" / "models" / ("chess-piece-shapes.pt" if args.shape_only else "chess-pieces.pt")
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(best, output)
     print(f"Trained weights copied to: {output}")

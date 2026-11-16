@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "chess>=1.11.2",
     "datasets>=4.0.0",
+    "maia3",
     "marimo>=0.25.2",
     "matplotlib>=3.11.2",
     "numpy>=2.0",
@@ -34,6 +35,9 @@ testpaths = ["tests"]
 [tool.uv.build-backend]
 module-name = "lichess_pipeline"
 module-root = "src"
+
+[tool.uv.sources]
+maia3 = { git = "https://github.com/CSSLab/maia3" }
 
 [tool.ruff.lint.per-file-ignores]
 # marimo cells need explicit returns and bare display expressions.

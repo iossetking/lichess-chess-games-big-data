@@ -12,7 +12,7 @@ def _():
     import matplotlib.pyplot as plt
     import polars as pl
 
-    from lichess_pipeline.data_ingestion import download_to_disk
+    from lichess_pipeline.data_ingestion import LichessConnectionError, download_to_disk
     from lichess_pipeline.pgn_parser import (
         VALID_RESULTS,
         clean_games_df,
@@ -46,6 +46,7 @@ def _():
         return path
 
     return (
+        LichessConnectionError,
         RAW_DIR,
         VALID_RESULTS,
         clean_games_df,
@@ -141,7 +142,7 @@ def _(mo):
         label="Elo mínimo (se exige a ambos jugadores)",
     )
     max_positions = mo.ui.number(
-        value=20000,
+        value=40000,
         start=1000,
         stop=500000,
         step=1000,
@@ -181,6 +182,7 @@ def _(mo):
 
 @app.cell
 def _(
+    LichessConnectionError,
     games_button,
     games_sample_url,
     max_games,
@@ -194,7 +196,10 @@ def _(
         mo.md("Pulsa **Leer partidas oficiales** para cargar la muestra."),
     )
     games_source = games_sample_url(int(year.value), int(month.value))
-    raw_games = parse_pgn_sample_df(games_source, max_games=int(max_games.value))
+    try:
+        raw_games = parse_pgn_sample_df(games_source, max_games=int(max_games.value))
+    except LichessConnectionError as exc:
+        mo.stop(True, mo.callout(mo.md(str(exc)), kind="danger"))
     mo.callout(
         mo.md(
             f"Leídas **{raw_games.height:,}** partidas de `{games_source}` "

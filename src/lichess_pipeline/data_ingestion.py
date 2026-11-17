@@ -13,6 +13,10 @@ has been consumed.
 from __future__ import annotations
 
 import io
+import socket
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,6 +30,12 @@ OFFICIAL_GAMES_URL_TEMPLATE = (
 OFFICIAL_EVALS_URL = "https://database.lichess.org/lichess_db_eval.jsonl.zst"
 PGN_RESULT_TOKENS = ("1-0", "0-1", "1/2-1/2")
 DOWNLOAD_CHUNK_BYTES = 1 << 20
+OPEN_ATTEMPTS = 3
+OPEN_BACKOFF_SECONDS = 0.75
+
+
+class LichessConnectionError(RuntimeError):
+    """Raised when the official Lichess files cannot be reached."""
 
 
 def games_month_url(year: int, month: int) -> str:
@@ -38,9 +48,46 @@ def is_remote(source: str | Path) -> bool:
     return str(source).startswith(("http://", "https://"))
 
 
+def _is_transient(reason: object) -> bool:
+    """True for network errors worth retrying (DNS, timeouts, resets)."""
+    return isinstance(reason, (socket.gaierror, TimeoutError, ConnectionError))
+
+
+def _connection_message(url: str, reason: object) -> str:
+    host = urllib.parse.urlsplit(url).hostname or url
+    if isinstance(reason, socket.gaierror):
+        return (
+            f"No se pudo resolver el host «{host}»: {reason}. "
+            "Revisa la conexión a internet, el DNS o la VPN y vuelve a intentarlo."
+        )
+    return f"No se pudo conectar con «{url}»: {reason}. Vuelve a intentarlo."
+
+
+def _urlopen(url: str, timeout: int = 60) -> io.IOBase:
+    """Open ``url``, retrying transient DNS/connection failures.
+
+    A failed ``getaddrinfo`` is common right after a sleep/wake or a network
+    change; retrying briefly avoids surfacing it as a crash in the notebooks.
+    """
+    for attempt in range(1, OPEN_ATTEMPTS + 1):
+        try:
+            return urllib.request.urlopen(url, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as exc:
+            if not _is_transient(exc.reason):
+                raise
+            if attempt == OPEN_ATTEMPTS:
+                raise LichessConnectionError(
+                    _connection_message(url, exc.reason)
+                ) from exc
+            time.sleep(OPEN_BACKOFF_SECONDS * attempt)
+    raise AssertionError("unreachable")
+
+
 def _open_binary(source: str | Path) -> io.IOBase:
     if is_remote(source):
-        return urllib.request.urlopen(str(source), timeout=60)
+        return _urlopen(str(source))
     return open(source, "rb")
 
 
@@ -110,7 +157,7 @@ def download_to_disk(url: str, dest_path: Path, max_bytes: int | None = None) ->
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with urllib.request.urlopen(url, timeout=60) as response, dest_path.open("wb") as out:
+    with _urlopen(url) as response, dest_path.open("wb") as out:
         while max_bytes is None or written < max_bytes:
             chunk = response.read(DOWNLOAD_CHUNK_BYTES)
             if not chunk:

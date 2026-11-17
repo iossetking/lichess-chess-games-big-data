@@ -1,8 +1,14 @@
+import io
+import socket
+import urllib.error
 from pathlib import Path
 
+import pytest
 import zstandard as zstd
 
+from lichess_pipeline import data_ingestion
 from lichess_pipeline.data_ingestion import (
+    LichessConnectionError,
     download_sample_to_disk,
     games_month_url,
     stream_pgn_blocks,
@@ -41,6 +47,64 @@ def test_stream_pgn_blocks_splits_games_and_respects_max_games(tmp_path: Path):
     assert len(blocks) == 1
     assert "https://lichess.org/abcd1234" in blocks[0]
     assert "1. e4 e5" in blocks[0]
+
+
+def test_open_binary_retries_transient_dns_errors(monkeypatch: pytest.MonkeyPatch):
+    failures = [socket.gaierror(8, "nodename nor servname provided")] * 2
+    calls: list[str] = []
+
+    def fake_urlopen(url: str, timeout: int = 60) -> io.BytesIO:
+        calls.append(url)
+        if failures:
+            raise urllib.error.URLError(failures.pop(0))
+        return io.BytesIO(b"payload")
+
+    monkeypatch.setattr(data_ingestion.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(data_ingestion.time, "sleep", lambda _seconds: None)
+
+    response = data_ingestion._open_binary(
+        "https://database.lichess.org/lichess_db_standard_rated_2025-01.pgn.zst"
+    )
+
+    assert response.read() == b"payload"
+    assert len(calls) == 3
+
+
+def test_open_binary_reports_dns_failure_with_actionable_message(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_urlopen(url: str, timeout: int = 60) -> io.BytesIO:
+        raise urllib.error.URLError(
+            socket.gaierror(8, "nodename nor servname provided")
+        )
+
+    monkeypatch.setattr(data_ingestion.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(data_ingestion.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(LichessConnectionError) as excinfo:
+        data_ingestion._open_binary(
+            "https://database.lichess.org/lichess_db_standard_rated_2025-01.pgn.zst"
+        )
+
+    message = str(excinfo.value)
+    assert "database.lichess.org" in message
+    assert "DNS" in message
+
+
+def test_open_binary_does_not_retry_http_errors(monkeypatch: pytest.MonkeyPatch):
+    calls: list[str] = []
+
+    def fake_urlopen(url: str, timeout: int = 60) -> io.BytesIO:
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(data_ingestion.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(data_ingestion.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(urllib.error.HTTPError):
+        data_ingestion._open_binary("https://database.lichess.org/missing.pgn.zst")
+
+    assert len(calls) == 1
 
 
 def test_download_sample_to_disk_writes_a_bounded_prefix(tmp_path: Path):

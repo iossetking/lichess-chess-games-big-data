@@ -452,7 +452,6 @@ def _(chess, mo):
 
 @app.cell
 def _(
-    Valuerror,
     chess,
     fen_input,
     mo,
@@ -473,7 +472,7 @@ def _(
     try:
         board = chess.Board(fen)
         fen_error = None
-    except Valuerror as error:
+    except ValueError as error:
         board = None
         fen_error = str(error)
     mo.stop(
@@ -526,11 +525,6 @@ def _(
         ],
         justify="start",
     )
-    return
-
-
-@app.cell
-def _():
     return
 
 

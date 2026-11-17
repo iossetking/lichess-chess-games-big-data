@@ -452,6 +452,7 @@ def _(chess, mo):
 
 @app.cell
 def _(
+    Valuerror,
     chess,
     fen_input,
     mo,
@@ -472,7 +473,7 @@ def _(
     try:
         board = chess.Board(fen)
         fen_error = None
-    except ValueError as error:
+    except Valuerror as error:
         board = None
         fen_error = str(error)
     mo.stop(
@@ -489,7 +490,7 @@ def _(
 
     stage1_predictions = predict_top_moves(stage1_eval_model, fen, top_k=3)
     stage2_predictions = predict_top_moves(stage2_eval_model, fen, top_k=3)
-    best_move = chess.Move.from_uci(stage2_predictions[0][0])
+    best_move = chess.Move.from_uci(stage1_predictions[0][0])
     board_svg = chess.svg.board(
         board,
         arrows=[chess.svg.Arrow(best_move.from_square, best_move.to_square)],
@@ -514,11 +515,11 @@ def _(
             mo.vstack(
                 [
                     mo.md(f"**Posición:** {source} · `{fen}`"),
-                    mo.md(f"**Mejor jugada del modelo ajustado:** `{best_move.uci()}`"),
+                    mo.md(f"**Mejor jugada del modelo:** `{best_move.uci()}`"),
                     mo.ui.table(pl.DataFrame(rows), pagination=False),
                     mo.md(
                         "Las tres jugadas de cada columna son legales en esta posición. "
-                        "La flecha del tablero muestra la mejor jugada de la etapa 2."
+                        "La flecha del tablero muestra la mejor jugada de la etapa 1."
                     ),
                 ]
             ),

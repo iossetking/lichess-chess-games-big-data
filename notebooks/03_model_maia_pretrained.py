@@ -62,12 +62,11 @@ def _():
         {"axes.spines.top": False, "axes.spines.right": False, "figure.dpi": 100}
     )
     return (
+        ChessPolicyNet,
         EVALS_PATH,
         MAIA_PATH,
-        MODELS_DIR,
-        STAGE2_PATH,
-        ChessPolicyNet,
         MaiaResidualPolicyNet,
+        STAGE2_PATH,
         chess,
         evaluate_model,
         load_evals,
@@ -157,7 +156,6 @@ def _(mo):
 
 @app.cell
 def _(
-    epochs,
     evals_df,
     make_tensor_dataset,
     max_train,
@@ -190,13 +188,13 @@ def _(
         ),
         kind="success",
     )
-    return eval_train_ds, eval_val_ds, eval_val
+    return eval_train_ds, eval_val, eval_val_ds
 
 
 @app.cell
 def _(
-    MaiaResidualPolicyNet,
     MAIA_PATH,
+    MaiaResidualPolicyNet,
     epochs,
     eval_train_ds,
     eval_val_ds,
@@ -225,18 +223,11 @@ def _(
             mo.callout(mo.md(f"Pesos guardados en `{MAIA_PATH}`."), kind="success"),
         ]
     )
-    return maia_frame, maia_metrics, maia_model
+    return maia_metrics, maia_model
 
 
 @app.cell
-def _(
-    ChessPolicyNet,
-    STAGE2_PATH,
-    eval_val_ds,
-    evaluate_model,
-    mo,
-    torch,
-):
+def _(ChessPolicyNet, STAGE2_PATH, eval_val_ds, evaluate_model, mo, torch):
     mo.stop(
         not STAGE2_PATH.exists(),
         mo.callout(
@@ -258,7 +249,6 @@ def _(
 def _(
     approach1_metrics,
     approach1_model,
-    chess,
     eval_val,
     maia_metrics,
     maia_model,
@@ -328,7 +318,7 @@ def _(
             ),
         ]
     )
-    return comparison, figure
+    return
 
 
 @app.cell
@@ -426,6 +416,11 @@ def _(
         ],
         justify="start",
     )
+    return
+
+
+@app.cell
+def _():
     return
 
 

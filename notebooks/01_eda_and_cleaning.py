@@ -534,8 +534,10 @@ def _(mo):
 
     Los tres Parquet de `data/processed/` alimentan los otros dos cuadernos:
 
-    - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1).
-    - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_model_maia_pretrained.py`.
+    - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1)
+      y `03_maia.py` (modelo A, LoRA con jugadas humanas).
+    - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_maia.py` (modelo B,
+      LoRA con jugadas de Stockfish).
 
     Para el servidor final se procesa por bloques (streaming -> Parquet) y se
     entrena con un dataset iterable; la lógica de parseo no cambia.

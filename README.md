@@ -26,18 +26,40 @@ por git).
 |---|---|---|
 | `notebooks/01_eda_and_cleaning.py` | Exploración y limpieza de partidas `.pgn.zst` y evaluaciones `lichess_db_eval.jsonl.zst` | `games_clean_sample.parquet`, `positions_games_sample.parquet`, `evals_clean_sample.parquet` |
 | `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y ajustada con jugadas de Stockfish | `approach1_stage1_scratch.pt`, `approach1_stage2_finetuned.pt` |
-| `notebooks/03_model_maia_pretrained.py` | **Enfoque 3**: red residual estilo Maia, comparada con el enfoque 1 en la misma validación | `approach3_maia_finetuned.pt` |
+| `notebooks/03_maia.py` | **Enfoque 3**: Maia-3 preentrenado ajustado con LoRA; un modelo con jugadas humanas y otro con jugadas de Stockfish | `maia3_lora_human.pt`, `maia3_lora_stockfish.pt` |
 
 Ejecuta los cuadernos en orden:
 
 ```bash
 uv run marimo edit notebooks/01_eda_and_cleaning.py
 uv run marimo edit notebooks/02_model_scratch_and_finetune.py
-uv run marimo edit notebooks/03_model_maia_pretrained.py
+uv run marimo edit notebooks/03_maia.py
 ```
 
 Los cuadernos 2 y 3 generan una muestra pequeña por su cuenta si los Parquet
 del cuaderno 1 todavía no existen.
+
+### Enfoque 3: Maia-3 + LoRA
+
+`03_maia.py` descarga el [Maia-3](https://github.com/CSSLab/maia3) oficial
+(5M o 23M parámetros) desde Hugging Face a `data/models/maia3/`, congela sus
+pesos y entrena adaptadores LoRA (unos 100 mil parámetros con rango 8) sobre
+el MLP de cada bloque y la cabeza de jugadas. Se entrenan dos adaptadores
+independientes, ambos a partir del mismo Maia-3:
+
+- **A · humano**: `positions_games_sample.parquet` (`fen` → `move_uci`).
+- **B · Stockfish**: `evals_clean_sample.parquet` (`fen` → `best_move`).
+
+El cuaderno compara los dos contra Maia-3 sin ajustar en un conjunto de
+prueba que no se usa para entrenar ni para elegir la época. También se puede
+ejecutar sin interfaz, y entonces entrena directamente:
+
+```bash
+uv run python notebooks/03_maia.py
+```
+
+La lógica está en `src/lichess_pipeline/model/maia3_lora.py`. El código de
+Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
 
 ### Cómo funciona el modelo de jugadas
 

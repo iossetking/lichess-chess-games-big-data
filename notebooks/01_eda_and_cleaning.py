@@ -162,7 +162,6 @@ def _(mo):
     return (
         month_selection,
         months_revision,
-        refresh_months,
         set_month_selection,
         set_year_selection,
         year_selection,
@@ -203,7 +202,7 @@ def _(
     # Leer el estado basta para que el botón «Actualizar» vuelva a consultar el índice.
     _ = months_revision
     availability_note
-    return available_months, availability_note
+    return (available_months,)
 
 
 @app.cell
@@ -333,8 +332,8 @@ def _(
     mo,
     month_from,
     month_label,
-    months_in_range,
     month_to,
+    months_in_range,
     year_from,
     year_to,
 ):
@@ -389,7 +388,7 @@ def _(
             )
         selection_summary = mo.vstack(_blocks)
     selection_summary
-    return months_selected, months_skipped
+    return (months_selected,)
 
 
 @app.cell
@@ -500,8 +499,8 @@ def _(
     download_to_disk,
     games_sample_url,
     keep_raw,
-    month_label,
     mo,
+    month_label,
     months_selected,
     raw_button,
 ):

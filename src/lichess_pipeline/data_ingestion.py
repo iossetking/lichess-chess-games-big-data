@@ -12,6 +12,7 @@ has been consumed.
 
 from __future__ import annotations
 
+import http.client
 import io
 import re
 import socket
@@ -61,11 +62,8 @@ def available_game_months(timeout: int = 60) -> list[tuple[int, int]]:
         with _urlopen(OFFICIAL_GAMES_INDEX_URL, timeout=timeout) as response:
             html = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        raise LichessConnectionError(
-            f"El índice de «{OFFICIAL_GAMES_INDEX_URL}» respondió "
-            f"{exc.code} {exc.reason}. Vuelve a intentarlo en unos minutos."
-        ) from exc
-    except OSError as exc:
+        raise _http_error(OFFICIAL_GAMES_INDEX_URL, exc) from exc
+    except (OSError, http.client.HTTPException) as exc:
         raise LichessConnectionError(
             f"No se pudo leer el índice de «{OFFICIAL_GAMES_INDEX_URL}»: {exc}."
         ) from exc
@@ -145,6 +143,14 @@ def _connection_message(url: str, reason: object) -> str:
     return f"No se pudo conectar con «{url}»: {reason}. Vuelve a intentarlo."
 
 
+def _http_error(url: str, exc: urllib.error.HTTPError) -> LichessConnectionError:
+    """Uniform error for a file the server refuses to serve (for example a 404)."""
+    return LichessConnectionError(
+        f"«{url}» respondió {exc.code} {exc.reason}. "
+        "Comprueba que el archivo exista y vuelve a intentarlo."
+    )
+
+
 def _urlopen(url: str, timeout: int = 60) -> io.IOBase:
     """Open ``url``, retrying transient DNS/connection failures.
 
@@ -169,7 +175,10 @@ def _urlopen(url: str, timeout: int = 60) -> io.IOBase:
 
 def _open_binary(source: str | Path) -> io.IOBase:
     if is_remote(source):
-        return _urlopen(str(source))
+        try:
+            return _urlopen(str(source))
+        except urllib.error.HTTPError as exc:
+            raise _http_error(str(source), exc) from exc
     return open(source, "rb")
 
 
@@ -239,7 +248,11 @@ def download_to_disk(url: str, dest_path: Path, max_bytes: int | None = None) ->
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with _urlopen(url) as response, dest_path.open("wb") as out:
+    try:
+        response_context = _urlopen(url)
+    except urllib.error.HTTPError as exc:
+        raise _http_error(url, exc) from exc
+    with response_context as response, dest_path.open("wb") as out:
         while max_bytes is None or written < max_bytes:
             chunk = response.read(DOWNLOAD_CHUNK_BYTES)
             if not chunk:

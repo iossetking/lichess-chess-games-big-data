@@ -112,10 +112,28 @@ def test_open_binary_does_not_retry_http_errors(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(data_ingestion.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(data_ingestion.time, "sleep", lambda _seconds: None)
 
-    with pytest.raises(urllib.error.HTTPError):
+    with pytest.raises(LichessConnectionError) as excinfo:
         data_ingestion._open_binary("https://database.lichess.org/missing.pgn.zst")
 
+    assert "404" in str(excinfo.value)
     assert len(calls) == 1
+
+
+def test_download_to_disk_converts_http_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    def fake_urlopen(url: str, timeout: int = 60) -> io.BytesIO:
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(data_ingestion.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(LichessConnectionError) as excinfo:
+        data_ingestion.download_to_disk(
+            "https://database.lichess.org/missing.pgn.zst",
+            tmp_path / "missing.pgn.zst",
+            max_bytes=1024,
+        )
+
+    assert "404" in str(excinfo.value)
+    assert not (tmp_path / "missing.pgn.zst").exists()
 
 
 def test_download_sample_to_disk_writes_a_bounded_prefix(tmp_path: Path):

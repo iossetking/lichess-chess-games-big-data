@@ -1,6 +1,7 @@
 import io
 import socket
 import urllib.error
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,21 @@ import zstandard as zstd
 from lichess_pipeline import data_ingestion
 from lichess_pipeline.data_ingestion import (
     LichessConnectionError,
+    assumed_game_months,
+    available_game_months,
     download_sample_to_disk,
     games_month_url,
+    months_in_range,
     stream_pgn_blocks,
     stream_zst_lines,
 )
+
+INDEX_HTML = """
+<a href="lichess_db_standard_rated_2025-01.pgn.zst">x</a>
+<a href="lichess_db_standard_rated_2025-01.pgn.zst.torrent">x</a>
+<a href="lichess_db_standard_rated_2013-12.pgn.zst">x</a>
+<a href="counts.txt">counts.txt</a>
+"""
 
 SAMPLE_PGN = (
     '[Event "Rated Blitz game"]\n[Site "https://lichess.org/abcd1234"]\n'
@@ -114,3 +125,64 @@ def test_download_sample_to_disk_writes_a_bounded_prefix(tmp_path: Path):
     result = download_sample_to_disk(source.as_uri(), destination, max_bytes=4)
     assert result == destination
     assert destination.read_bytes() == b"0123"
+
+
+def test_available_game_months_parses_index_and_ignores_other_files(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        data_ingestion.urllib.request,
+        "urlopen",
+        lambda url, timeout=60: io.BytesIO(INDEX_HTML.encode("utf-8")),
+    )
+
+    assert available_game_months() == [(2013, 12), (2025, 1)]
+
+
+def test_available_game_months_raises_when_index_has_no_files(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        data_ingestion.urllib.request,
+        "urlopen",
+        lambda url, timeout=60: io.BytesIO(b"<html>empty</html>"),
+    )
+
+    with pytest.raises(LichessConnectionError):
+        available_game_months()
+
+
+def test_available_game_months_wraps_http_errors(monkeypatch: pytest.MonkeyPatch):
+    def fake_urlopen(url: str, timeout: int = 60) -> io.BytesIO:
+        raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(data_ingestion.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(LichessConnectionError):
+        available_game_months()
+
+
+def test_months_in_range_returns_selected_and_missing():
+    available = [(2024, 1), (2024, 2), (2024, 3), (2025, 1), (2025, 2)]
+
+    selected, missing = months_in_range((2024, 2025), (1, 2), available)
+
+    assert selected == [(2024, 1), (2024, 2), (2025, 1), (2025, 2)]
+    assert missing == []
+
+
+def test_months_in_range_reports_unavailable_months_and_sorts_ranges():
+    available = [(2024, 1), (2024, 3)]
+
+    selected, missing = months_in_range((2024, 2024), (3, 1), available)
+
+    assert selected == [(2024, 1), (2024, 3)]
+    assert missing == [(2024, 2)]
+
+
+def test_assumed_game_months_stops_at_last_closed_month():
+    months = assumed_game_months(today=date(2026, 11, 18))
+
+    assert months[0] == (2013, 1)
+    assert months[-1] == (2026, 10)
+    assert len(months) == 166

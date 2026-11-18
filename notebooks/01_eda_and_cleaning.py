@@ -223,31 +223,58 @@ def _(
     current_months = tuple(month_selection())
     if not (1 <= current_months[0] <= current_months[1] <= 12):
         current_months = (default_month, default_month)
-    year_range = mo.ui.range_slider(
-        start=years[0],
-        stop=years[-1],
-        step=1,
-        value=current_years,
-        label="Años de las partidas",
-        show_value=False,
-        debounce=True,
-        on_change=set_year_selection,
+    month_labels = {
+        number: f"{number:02d} · {name}"
+        for number, name in enumerate(
+            (
+                "enero",
+                "febrero",
+                "marzo",
+                "abril",
+                "mayo",
+                "junio",
+                "julio",
+                "agosto",
+                "septiembre",
+                "octubre",
+                "noviembre",
+                "diciembre",
+            ),
+            start=1,
+        )
+    }
+    month_options = {label: number for number, label in month_labels.items()}
+    year_from = mo.ui.dropdown(
+        options=years,
+        value=current_years[0],
+        label="Desde el año",
+        on_change=lambda value: set_year_selection(
+            (min(int(value), year_selection()[1]), year_selection()[1])
+        ),
     )
-    month_range = mo.ui.range_slider(
-        start=1,
-        stop=12,
-        step=1,
-        value=current_months,
-        label="Meses de cada año (de inicio a fin)",
-        show_value=False,
-        debounce=True,
-        on_change=set_month_selection,
+    year_to = mo.ui.dropdown(
+        options=years,
+        value=current_years[1],
+        label="Hasta el año",
+        on_change=lambda value: set_year_selection(
+            (year_selection()[0], max(int(value), year_selection()[0]))
+        ),
     )
-    year_readout = mo.md(
-        f"Años seleccionados: **{current_years[0]} – {current_years[1]}**"
+    month_from = mo.ui.dropdown(
+        options=month_options,
+        value=month_labels[current_months[0]],
+        label="Desde el mes",
+        on_change=lambda value: set_month_selection(
+            (min(int(value), month_selection()[1]), month_selection()[1])
+        ),
     )
-    month_readout = mo.md(
-        f"Meses por año: **{current_months[0]:02d} – {current_months[1]:02d}**"
+    month_to = mo.ui.dropdown(
+        options=month_options,
+        value=month_labels[current_months[1]],
+        label="Hasta el mes",
+        on_change=lambda value: set_month_selection(
+            (month_selection()[0], max(int(value), month_selection()[0]))
+        ),
     )
     max_games = mo.ui.number(
         value=3000,
@@ -277,10 +304,8 @@ def _(
     mo.vstack(
         [
             mo.md("## Controles de la muestra"),
-            year_range,
-            year_readout,
-            month_range,
-            month_readout,
+            mo.hstack([year_from, year_to], justify="start", wrap=True),
+            mo.hstack([month_from, month_to], justify="start", wrap=True),
             max_games,
             min_elo,
             max_positions,
@@ -293,9 +318,11 @@ def _(
         max_games,
         max_positions,
         min_elo,
-        month_range,
+        month_from,
+        month_to,
         raw_button,
-        year_range,
+        year_from,
+        year_to,
     )
 
 
@@ -304,13 +331,17 @@ def _(
     available_months,
     max_games,
     mo,
+    month_from,
     month_label,
-    month_range,
     months_in_range,
-    year_range,
+    month_to,
+    year_from,
+    year_to,
 ):
     months_selected, months_skipped = months_in_range(
-        year_range.value, month_range.value, available_months
+        (year_from.value, year_to.value),
+        (month_from.value, month_to.value),
+        available_months,
     )
     if not months_selected:
         selection_summary = mo.callout(

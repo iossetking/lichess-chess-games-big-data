@@ -229,7 +229,8 @@ def _(
         step=1,
         value=current_years,
         label="Años de las partidas",
-        show_value=True,
+        show_value=False,
+        debounce=True,
         on_change=set_year_selection,
     )
     month_range = mo.ui.range_slider(
@@ -238,8 +239,15 @@ def _(
         step=1,
         value=current_months,
         label="Meses de cada año (de inicio a fin)",
-        show_value=True,
+        show_value=False,
+        debounce=True,
         on_change=set_month_selection,
+    )
+    year_readout = mo.md(
+        f"Años seleccionados: **{current_years[0]} – {current_years[1]}**"
+    )
+    month_readout = mo.md(
+        f"Meses por año: **{current_months[0]:02d} – {current_months[1]:02d}**"
     )
     max_games = mo.ui.number(
         value=3000,
@@ -270,7 +278,9 @@ def _(
         [
             mo.md("## Controles de la muestra"),
             year_range,
+            year_readout,
             month_range,
+            month_readout,
             max_games,
             min_elo,
             max_positions,

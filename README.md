@@ -27,7 +27,7 @@ por git).
 | `notebooks/01_eda_and_cleaning.py` | Exploración y limpieza de partidas `.pgn.zst` y evaluaciones `lichess_db_eval.jsonl.zst` | `games_clean_sample.parquet`, `positions_games_sample.parquet`, `evals_clean_sample.parquet` |
 | `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y dos ajustes finos con Stockfish (todos los pesos y LoRA en la cabeza) | `approach1_scratch.pt`, `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt` |
 | `notebooks/03_maia.py` | **Enfoque 3**: Maia-3 preentrenado ajustado con LoRA; un modelo con jugadas humanas y otro con jugadas de Stockfish | `maia3_lora_human.pt`, `maia3_lora_stockfish.pt` |
-| `notebooks/04_model_playground.py` | **Prueba visual**: carga los `.pt` del enfoque 1 y compara sus jugadas en un FEN o en una posición de partida guardada; no entrena | — |
+| `notebooks/04_model_playground.py` | **Prueba visual**: detecta todos los `.pt`/`.pth` bajo `data/models/` (incluidas subcarpetas) y compara las jugadas de los checkpoints elegidos en un FEN o en una partida guardada; no entrena | — |
 
 Ejecuta los cuadernos en orden:
 
@@ -39,10 +39,10 @@ uv run marimo edit notebooks/04_model_playground.py
 ```
 
 Los cuadernos 2 y 3 generan una muestra pequeña por su cuenta si los Parquet
-del cuaderno 1 todavía no existen. El cuaderno 4 necesita los archivos
-`approach1_*.pt` que guarda el cuaderno 2; las posiciones de partidas guardadas
-solo sirven para inspección visual, no como una medida independiente de
-exactitud.
+del cuaderno 1 todavía no existen. El cuaderno 4 detecta cualquier archivo
+`.pt` o `.pth` que guardes bajo `data/models/`, incluidas subcarpetas, y permite
+elegir cuáles comparar; las posiciones de partidas guardadas solo sirven para
+inspección visual, no como una medida independiente de exactitud.
 
 ### Enfoque 3: Maia-3 + LoRA
 

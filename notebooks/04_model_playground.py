@@ -6,6 +6,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    from datetime import datetime
     from functools import lru_cache
     from pathlib import Path
 
@@ -15,7 +16,6 @@ def _():
     import polars as pl
 
     from lichess_pipeline.model.checkpoints import (
-        POLICY_CHECKPOINTS,
         discover_policy_checkpoints,
         load_policy_checkpoint,
     )
@@ -29,10 +29,10 @@ def _():
     load_cached = lru_cache(maxsize=None)(load_policy_checkpoint)
     return (
         MODELS_DIR,
-        POLICY_CHECKPOINTS,
         POSITIONS_PATH,
         PROJECT_DIR,
         chess,
+        datetime,
         discover_policy_checkpoints,
         load_cached,
         mo,
@@ -42,20 +42,17 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(POLICY_CHECKPOINTS, mo):
-    mo.md(rf"""
+def _(mo):
+    mo.md(r"""
     # 4. Prueba visual de los modelos de jugadas
 
-    Carga los tres checkpoints del enfoque 1 y compara sus jugadas sin
-    volver a entrenar:
+    Detecta **todos** los archivos `.pt` y `.pth` dentro de `data/models/`,
+    incluidas sus subcarpetas, y compara las jugadas de los checkpoints que
+    elijas sin volver a entrenar.
 
-    | Etiqueta | Archivo |
-    |---|---|
-    | Desde cero | `{POLICY_CHECKPOINTS["Desde cero"]}` |
-    | Ajuste de pesos | `{POLICY_CHECKPOINTS["Ajuste de pesos"]}` |
-    | Ajuste LoRA | `{POLICY_CHECKPOINTS["Ajuste LoRA"]}` |
-
-    Se buscan en `data/models/` y, si no están, en `data/models/backups/`.
+    La tabla muestra cada archivo con su carpeta de origen. Usa el selector
+    para decidir qué modelos entran en la comparación; solo esos se cargan en
+    memoria.
 
     Hay dos formas de elegir la posición: escribir un **FEN** o recorrer una
     **partida guardada** del Parquet del cuaderno 1. En la segunda vista
@@ -71,8 +68,8 @@ def _(POLICY_CHECKPOINTS, mo):
 @app.cell
 def _(
     MODELS_DIR,
-    POLICY_CHECKPOINTS,
     PROJECT_DIR,
+    datetime,
     discover_policy_checkpoints,
     mo,
     pl,
@@ -81,41 +78,50 @@ def _(
     if checkpoints:
         checkpoint_table = pl.DataFrame(
             {
-                "Modelo": list(checkpoints),
+                "Checkpoint": list(checkpoints),
                 "Archivo": [
                     str(path.relative_to(PROJECT_DIR)) for path in checkpoints.values()
                 ],
-                "Tamaño (KB)": [
-                    round(path.stat().st_size / 1024, 1)
+                "Tamaño (MB)": [
+                    round(path.stat().st_size / (1024 * 1024), 1)
+                    for path in checkpoints.values()
+                ],
+                "Modificado": [
+                    datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
                     for path in checkpoints.values()
                 ],
             }
+        )
+        checkpoint_choice = mo.ui.multiselect(
+            options=list(checkpoints),
+            value=list(checkpoints),
+            label="Checkpoints a comparar (solo estos se cargan en memoria)",
         )
         checkpoint_view = mo.vstack(
             [
                 mo.md("## Checkpoints encontrados"),
                 mo.ui.table(checkpoint_table, pagination=False),
+                checkpoint_choice,
             ]
         )
     else:
-        checkpoint_table = pl.DataFrame(
-            schema={
-                "Modelo": pl.String,
-                "Archivo": pl.String,
-                "Tamaño (KB)": pl.Float64,
-            }
+        checkpoint_choice = mo.ui.multiselect(
+            options=["Sin checkpoints"],
+            value=[],
+            label="Checkpoints a comparar",
         )
         checkpoint_view = mo.callout(
             mo.md(
-                "No se encontró ningún checkpoint en "
-                f"`{MODELS_DIR}` ni en su carpeta `backups/`. Ejecuta el "
-                "cuaderno 2 y guarda los modelos. Se esperan:\n\n"
-                + "\n".join(f"- `{name}`" for name in POLICY_CHECKPOINTS.values())
+                "No se encontró ningún archivo `.pt` o `.pth` dentro de "
+                f"`{MODELS_DIR}`. Guarda los modelos ahí o en una subcarpeta "
+                "con el nombre que quieras."
             ),
             kind="warn",
         )
     checkpoint_view
-    return (checkpoints,)
+    return checkpoints, checkpoint_choice
 
 
 @app.cell
@@ -168,10 +174,17 @@ def _(POSITIONS_PATH, mo, pl):
 
 
 @app.cell
-def _(checkpoints, chess, games_df, mo):
-    if checkpoints:
-        _labels = list(checkpoints)
-        _default_model = "Ajuste LoRA" if "Ajuste LoRA" in checkpoints else _labels[0]
+def _(checkpoint_choice, checkpoints, chess, games_df, mo):
+    _selected = {
+        label: checkpoints[label]
+        for label in checkpoint_choice.value
+        if label in checkpoints
+    }
+    if _selected:
+        _labels = list(_selected)
+        _default_model = next(
+            (label for label in _labels if "lora" in label.lower()), _labels[0]
+        )
         model_choice = mo.ui.dropdown(
             options=_labels,
             value=_default_model,
@@ -179,8 +192,8 @@ def _(checkpoints, chess, games_df, mo):
         )
     else:
         model_choice = mo.ui.dropdown(
-            options=["Sin checkpoints"],
-            value="Sin checkpoints",
+            options=["Selecciona al menos un checkpoint"],
+            value="Selecciona al menos un checkpoint",
             label="Modelo cuya flecha se dibuja en el tablero",
         )
 
@@ -246,14 +259,7 @@ def _(checkpoints, chess, games_df, mo):
             fen_input,
         ]
     )
-    return (
-        fen_input,
-        game_choice,
-        model_choice,
-        preset,
-        presets,
-        source,
-    )
+    return fen_input, game_choice, model_choice, preset, presets, source
 
 
 @app.cell
@@ -348,6 +354,7 @@ def _(
 @app.cell
 def _(
     board,
+    checkpoint_choice,
     checkpoints,
     chess,
     fen,
@@ -359,19 +366,24 @@ def _(
     predict_top_moves,
     source,
 ):
+    selected_checkpoints = {
+        label: checkpoints[label]
+        for label in checkpoint_choice.value
+        if label in checkpoints
+    }
     mo.stop(
-        not checkpoints,
+        not selected_checkpoints,
         mo.callout(
             mo.md(
-                "No hay checkpoints cargados. Ejecuta y guarda los modelos del "
-                "cuaderno 2 para usar esta sección."
+                "Selecciona al menos un checkpoint en la tabla de arriba para "
+                "dibujar el tablero y comparar jugadas."
             ),
             kind="warn",
         ),
     )
     models = {}
     load_errors = []
-    for label, path in checkpoints.items():
+    for label, path in selected_checkpoints.items():
         try:
             models[label] = load_cached(path)
         except (RuntimeError, FileNotFoundError) as error:

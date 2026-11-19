@@ -3,41 +3,53 @@ import pytest
 import torch
 
 from lichess_pipeline.model.checkpoints import (
-    POLICY_CHECKPOINTS,
     discover_policy_checkpoints,
     load_policy_checkpoint,
 )
 from lichess_pipeline.model.scratch_net import ChessPolicyNet, predict_top_moves
 
 
-def test_discover_prefers_main_dir_and_ignores_other_checkpoints(tmp_path):
-    for name in POLICY_CHECKPOINTS.values():
-        (tmp_path / "backups").mkdir(exist_ok=True)
-        (tmp_path / "backups" / name).write_bytes(b"backup")
-    main = tmp_path / POLICY_CHECKPOINTS["Desde cero"]
-    main.write_bytes(b"main")
-    (tmp_path / "chess-pieces.pt").write_bytes(b"vision")
+def test_discover_labels_nested_checkpoints_by_folder_and_filename(tmp_path):
+    (tmp_path / "runs" / "full-data").mkdir(parents=True)
+    (tmp_path / "runs" / "full-data" / "approach1_lora_v2.pt").write_bytes(b"a")
+    (tmp_path / "runs" / "small-data").mkdir(parents=True)
+    (tmp_path / "runs" / "small-data" / "scratch_v1.pth").write_bytes(b"b")
+    (tmp_path / "legacy.pt").write_bytes(b"c")
+    (tmp_path / "notes.txt").write_text("not a checkpoint")
 
     found = discover_policy_checkpoints(tmp_path)
 
     assert found == {
-        "Desde cero": main,
-        "Ajuste de pesos": tmp_path / "backups" / POLICY_CHECKPOINTS["Ajuste de pesos"],
-        "Ajuste LoRA": tmp_path / "backups" / POLICY_CHECKPOINTS["Ajuste LoRA"],
+        "legacy": tmp_path / "legacy.pt",
+        "runs/full-data/approach1_lora_v2": (
+            tmp_path / "runs" / "full-data" / "approach1_lora_v2.pt"
+        ),
+        "runs/small-data/scratch_v1": (
+            tmp_path / "runs" / "small-data" / "scratch_v1.pth"
+        ),
     }
+
+
+def test_discover_keeps_checkpoints_from_several_folders(tmp_path):
+    for folder, name in (
+        ("runs/a", "scratch_v1.pt"),
+        ("runs/b", "scratch_v2.pt"),
+        ("backups", "scratch_v0.pt"),
+    ):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / name).write_bytes(b"weights")
+
+    found = discover_policy_checkpoints(tmp_path)
+
+    assert list(found) == [
+        "backups/scratch_v0",
+        "runs/a/scratch_v1",
+        "runs/b/scratch_v2",
+    ]
 
 
 def test_discover_returns_empty_mapping_for_missing_directory(tmp_path):
     assert discover_policy_checkpoints(tmp_path / "absent") == {}
-
-
-def test_discover_omits_labels_whose_file_is_absent(tmp_path):
-    (tmp_path / POLICY_CHECKPOINTS["Desde cero"]).write_bytes(b"scratch")
-    (tmp_path / POLICY_CHECKPOINTS["Ajuste LoRA"]).write_bytes(b"lora")
-
-    found = discover_policy_checkpoints(tmp_path)
-
-    assert list(found) == ["Desde cero", "Ajuste LoRA"]
 
 
 def test_load_round_trips_predictions_and_switches_to_eval(tmp_path):

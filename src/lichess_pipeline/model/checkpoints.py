@@ -1,9 +1,11 @@
-"""Locate and load the move-prediction checkpoints saved by notebook 02.
+"""Locate and load the move-prediction checkpoints saved for notebook 04.
 
-The three ``approach1_*.pt`` files are plain PyTorch state dicts for
+Every ``.pt``/``.pth`` file under ``data/models/`` is a candidate, including
+files in manually named run folders. The notebook lists them by their path
+relative to ``data/models/`` and lets the user choose which ones to compare.
+The files are plain PyTorch state dicts for
 :class:`~lichess_pipeline.model.scratch_net.ChessPolicyNet`; the LoRA adapter is
-merged before saving, so all three load through the same path. Checkpoints may
-live in ``data/models/`` or in ``data/models/backups/`` after a retrain.
+merged before saving, so those checkpoints load through the same path too.
 """
 
 from __future__ import annotations
@@ -15,27 +17,27 @@ import torch
 
 from lichess_pipeline.model.scratch_net import ChessPolicyNet
 
-POLICY_CHECKPOINTS: dict[str, str] = {
-    "Desde cero": "approach1_scratch.pt",
-    "Ajuste de pesos": "approach1_weight_ftuning.pt",
-    "Ajuste LoRA": "approach1_lora_ftuning.pt",
-}
+CHECKPOINT_SUFFIXES = {".pt", ".pth"}
 
 
 def discover_policy_checkpoints(models_dir: Path) -> dict[str, Path]:
-    """Return ``label -> path`` for the policy checkpoints that exist.
+    """Return ``label -> path`` for every checkpoint under ``models_dir``.
 
-    The main ``models_dir`` wins over ``models_dir/backups``. Only the known
-    filenames are considered, so YOLO and other ``.pt`` files never appear.
+    Labels are the relative path without the suffix, using ``/`` as separator,
+    so ``runs/full-data/lora_v2.pt`` becomes ``runs/full-data/lora_v2``.
+    Hidden directories are skipped and the result is sorted by label.
     """
+    if not models_dir.is_dir():
+        return {}
     found: dict[str, Path] = {}
-    for label, filename in POLICY_CHECKPOINTS.items():
-        for directory in (models_dir, models_dir / "backups"):
-            candidate = directory / filename
-            if candidate.is_file():
-                found[label] = candidate
-                break
-    return found
+    for path in models_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in CHECKPOINT_SUFFIXES:
+            continue
+        relative = path.relative_to(models_dir)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        found[relative.with_suffix("").as_posix()] = path
+    return dict(sorted(found.items()))
 
 
 def load_policy_checkpoint(path: Path) -> ChessPolicyNet:

@@ -31,6 +31,15 @@ def test_discover_returns_empty_mapping_for_missing_directory(tmp_path):
     assert discover_policy_checkpoints(tmp_path / "absent") == {}
 
 
+def test_discover_omits_labels_whose_file_is_absent(tmp_path):
+    (tmp_path / POLICY_CHECKPOINTS["Desde cero"]).write_bytes(b"scratch")
+    (tmp_path / POLICY_CHECKPOINTS["Ajuste LoRA"]).write_bytes(b"lora")
+
+    found = discover_policy_checkpoints(tmp_path)
+
+    assert list(found) == ["Desde cero", "Ajuste LoRA"]
+
+
 def test_load_round_trips_predictions_and_switches_to_eval(tmp_path):
     model = ChessPolicyNet()
     torch.manual_seed(0)
@@ -48,3 +57,19 @@ def test_load_round_trips_predictions_and_switches_to_eval(tmp_path):
 def test_load_missing_checkpoint_names_the_file(tmp_path):
     with pytest.raises(FileNotFoundError, match="approach1_scratch.pt"):
         load_policy_checkpoint(tmp_path / "approach1_scratch.pt")
+
+
+def test_load_corrupt_checkpoint_names_the_file(tmp_path):
+    path = tmp_path / "approach1_scratch.pt"
+    path.write_bytes(b"not a checkpoint")
+
+    with pytest.raises(RuntimeError, match="approach1_scratch.pt"):
+        load_policy_checkpoint(path)
+
+
+def test_load_incompatible_state_dict_names_the_file(tmp_path):
+    path = tmp_path / "approach1_weight_ftuning.pt"
+    torch.save({"unexpected": torch.zeros(3)}, path)
+
+    with pytest.raises(RuntimeError, match="approach1_weight_ftuning.pt"):
+        load_policy_checkpoint(path)

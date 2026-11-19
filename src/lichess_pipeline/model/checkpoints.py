@@ -8,6 +8,7 @@ live in ``data/models/`` or in ``data/models/backups/`` after a retrain.
 
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 
 import torch
@@ -38,9 +39,21 @@ def discover_policy_checkpoints(models_dir: Path) -> dict[str, Path]:
 
 
 def load_policy_checkpoint(path: Path) -> ChessPolicyNet:
-    """Load ``path`` into a default ``ChessPolicyNet`` ready for inference."""
+    """Load ``path`` into a default ``ChessPolicyNet`` ready for inference.
+
+    A corrupt or incompatible file raises ``RuntimeError`` naming the file, so
+    the notebook can report which checkpoint failed instead of showing PyTorch's
+    raw unpickling traceback.
+    """
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     model = ChessPolicyNet()
-    model.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state)
+    except Exception as error:
+        detail = str(error).splitlines()[0]
+        if isinstance(error, (pickle.UnpicklingError, EOFError)):
+            detail = "no contiene un state_dict de PyTorch válido"
+        raise RuntimeError(f"Checkpoint inválido: {path.name}: {detail}") from error
     return model.eval()

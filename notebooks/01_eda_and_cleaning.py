@@ -12,7 +12,13 @@ def _():
     import matplotlib.pyplot as plt
     import polars as pl
 
-    from lichess_pipeline.data_ingestion import download_to_disk
+    from lichess_pipeline.data_ingestion import (
+        LichessConnectionError,
+        assumed_game_months,
+        available_game_months,
+        download_to_disk,
+        months_in_range,
+    )
     from lichess_pipeline.pgn_parser import (
         VALID_RESULTS,
         clean_games_df,
@@ -45,9 +51,17 @@ def _():
         frame.write_parquet(path)
         return path
 
+    def month_label(month: tuple[int, int]) -> str:
+        """Format a ``(year, month)`` pair as ``AAAA-MM``."""
+        year, number = month
+        return f"{year}-{number:02d}"
+
     return (
+        LichessConnectionError,
         RAW_DIR,
         VALID_RESULTS,
+        assumed_game_months,
+        available_game_months,
         clean_games_df,
         download_to_disk,
         evals_url,
@@ -55,6 +69,8 @@ def _():
         games_sample_url,
         load_clean_evals_df,
         mo,
+        month_label,
+        months_in_range,
         parse_pgn_sample_df,
         pl,
         plt,
@@ -74,7 +90,7 @@ def _(mo):
     | Partidas estándar | `lichess_db_standard_rated_AAAA-MM.pgn.zst` | Entrenamiento: jugadas humanas de Elo alto |
     | Evaluaciones | `lichess_db_eval.jsonl.zst` | Fine tuning: mejores jugadas de Stockfish |
 
-    Solo se descarga el prefijo necesario: el flujo HTTP se cierra en cuanto se alcanza el número de partidas o de evaluaciones pedido.
+    Primero se consulta el índice de `database.lichess.org/standard/` para saber qué meses tienen archivo, y después se elige un **rango de años** y un **rango de meses** (el rango de meses se aplica a cada año). Solo se descarga el prefijo necesario de cada archivo: el flujo HTTP se cierra en cuanto se alcanza el número de partidas pedido.
 
     **Output `data/processed/`:** `games_clean_sample.parquet`, `positions_games_sample.parquet` y `evals_clean_sample.parquet`.
     """)
@@ -126,12 +142,145 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    year = mo.ui.dropdown(options=[2024, 2025], value=2025, label="Año de las partidas")
-    month = mo.ui.dropdown(
-        options=list(range(1, 13)), value=1, label="Mes de las partidas"
+    months_revision, set_months_revision = mo.state(0)
+    year_selection, set_year_selection = mo.state((0, 0))
+    month_selection, set_month_selection = mo.state((0, 0))
+    refresh_months = mo.ui.button(
+        label="Actualizar disponibilidad",
+        on_click=lambda _count: set_months_revision(lambda revision: revision + 1),
+    )
+    mo.vstack(
+        [
+            mo.md("## Disponibilidad de archivos oficiales"),
+            mo.md(
+                "Se consulta el índice de `database.lichess.org/standard/` para saber "
+                "qué meses tienen `.pgn.zst` antes de elegir el rango."
+            ),
+            refresh_months,
+        ]
+    )
+    return (
+        month_selection,
+        months_revision,
+        set_month_selection,
+        set_year_selection,
+        year_selection,
+    )
+
+
+@app.cell
+def _(
+    LichessConnectionError,
+    assumed_game_months,
+    available_game_months,
+    mo,
+    month_label,
+    months_revision,
+):
+    try:
+        available_months = available_game_months()
+        availability_note = mo.callout(
+            mo.md(
+                f"**{len(available_months)}** meses con archivo oficial, de "
+                f"`{month_label(available_months[0])}` a "
+                f"`{month_label(available_months[-1])}`."
+            ),
+            kind="success",
+        )
+    except LichessConnectionError as exc:
+        available_months = assumed_game_months()
+        availability_note = mo.callout(
+            mo.md(
+                f"{exc}\n\n"
+                "Se asume el rango continuo "
+                f"`{month_label(available_months[0])}` … "
+                f"`{month_label(available_months[-1])}`; los meses que falten se "
+                "descartan al leer."
+            ),
+            kind="warn",
+        )
+    # Leer el estado basta para que el botón «Actualizar» vuelva a consultar el índice.
+    _ = months_revision
+    availability_note
+    return (available_months,)
+
+
+@app.cell
+def _(
+    available_months,
+    mo,
+    month_selection,
+    set_month_selection,
+    set_year_selection,
+    year_selection,
+):
+    years = sorted({year for year, _month in available_months})
+    default_year, default_month = available_months[-1]
+    current_years = tuple(year_selection())
+    if not (years[0] <= current_years[0] <= current_years[1] <= years[-1]):
+        current_years = (default_year, default_year)
+    current_months = tuple(month_selection())
+    if not (1 <= current_months[0] <= current_months[1] <= 12):
+        current_months = (default_month, default_month)
+    month_labels = {
+        number: f"{number:02d} · {name}"
+        for number, name in enumerate(
+            (
+                "enero",
+                "febrero",
+                "marzo",
+                "abril",
+                "mayo",
+                "junio",
+                "julio",
+                "agosto",
+                "septiembre",
+                "octubre",
+                "noviembre",
+                "diciembre",
+            ),
+            start=1,
+        )
+    }
+    month_options = {label: number for number, label in month_labels.items()}
+    year_from = mo.ui.dropdown(
+        options=years,
+        value=current_years[0],
+        label="Desde el año",
+        on_change=lambda value: set_year_selection(
+            (min(int(value), year_selection()[1]), year_selection()[1])
+        ),
+    )
+    year_to = mo.ui.dropdown(
+        options=years,
+        value=current_years[1],
+        label="Hasta el año",
+        on_change=lambda value: set_year_selection(
+            (year_selection()[0], max(int(value), year_selection()[0]))
+        ),
+    )
+    month_from = mo.ui.dropdown(
+        options=month_options,
+        value=month_labels[current_months[0]],
+        label="Desde el mes",
+        on_change=lambda value: set_month_selection(
+            (min(int(value), month_selection()[1]), month_selection()[1])
+        ),
+    )
+    month_to = mo.ui.dropdown(
+        options=month_options,
+        value=month_labels[current_months[1]],
+        label="Hasta el mes",
+        on_change=lambda value: set_month_selection(
+            (month_selection()[0], max(int(value), month_selection()[0]))
+        ),
     )
     max_games = mo.ui.number(
-        value=3000, start=200, stop=50000, step=200, label="Partidas a leer del .pgn.zst"
+        value=3000,
+        start=200,
+        stop=50000,
+        step=200,
+        label="Partidas a leer por mes del .pgn.zst",
     )
     min_elo = mo.ui.slider(
         start=1500,
@@ -141,26 +290,105 @@ def _(mo):
         label="Elo mínimo (se exige a ambos jugadores)",
     )
     max_positions = mo.ui.number(
-        value=20000,
+        value=40000,
         start=1000,
         stop=500000,
         step=1000,
         label="Máximo de posiciones (FEN) a extraer",
     )
     keep_raw = mo.ui.checkbox(
-        value=False, label="Guardar también el .zst en data/raw (máx. 100 MB)"
+        value=False, label="Guardar también los .zst en data/raw (máx. 100 MB en total)"
     )
+    raw_button = mo.ui.run_button(label="Guardar los .zst seleccionados")
     mo.vstack(
         [
             mo.md("## Controles de la muestra"),
-            mo.hstack([year, month], justify="start"),
+            mo.hstack([year_from, year_to], justify="start", wrap=True),
+            mo.hstack([month_from, month_to], justify="start", wrap=True),
             max_games,
             min_elo,
             max_positions,
             keep_raw,
+            raw_button,
         ]
     )
-    return keep_raw, max_games, max_positions, min_elo, month, year
+    return (
+        keep_raw,
+        max_games,
+        max_positions,
+        min_elo,
+        month_from,
+        month_to,
+        raw_button,
+        year_from,
+        year_to,
+    )
+
+
+@app.cell
+def _(
+    available_months,
+    max_games,
+    mo,
+    month_from,
+    month_label,
+    month_to,
+    months_in_range,
+    year_from,
+    year_to,
+):
+    months_selected, months_skipped = months_in_range(
+        (year_from.value, year_to.value),
+        (month_from.value, month_to.value),
+        available_months,
+    )
+    if not months_selected:
+        selection_summary = mo.callout(
+            mo.md("La selección no incluye ningún mes con archivo. Amplía el rango."),
+            kind="danger",
+        )
+    else:
+        listed = ", ".join(month_label(month) for month in months_selected)
+        if len(months_selected) > 24:
+            listed = (
+                f"{month_label(months_selected[0])} … "
+                f"{month_label(months_selected[-1])}"
+            )
+        total_cap = int(max_games.value) * len(months_selected)
+        _blocks = [
+            mo.callout(
+                mo.md(
+                    f"**{len(months_selected)}** meses seleccionados: {listed}.\n\n"
+                    f"Tope de lectura: **{total_cap:,}** partidas "
+                    f"({int(max_games.value):,} por mes)."
+                ),
+                kind="info",
+            )
+        ]
+        if total_cap > 100_000:
+            _blocks.append(
+                mo.callout(
+                    mo.md(
+                        f"Es una muestra grande: hasta **{total_cap:,}** partidas se "
+                        "guardan en memoria a la vez. Baja las partidas por mes o "
+                        "reduce el rango si el equipo se queda sin memoria."
+                    ),
+                    kind="warn",
+                )
+            )
+        if months_skipped:
+            _blocks.append(
+                mo.callout(
+                    mo.md(
+                        "Sin archivo, se descartan: "
+                        + ", ".join(month_label(month) for month in months_skipped)
+                    ),
+                    kind="warn",
+                )
+            )
+        selection_summary = mo.vstack(_blocks)
+    selection_summary
+    return (months_selected,)
 
 
 @app.cell
@@ -170,8 +398,9 @@ def _(mo):
         [
             mo.md("## 1. Partidas estándar"),
             mo.md(
-                "Pulsa el botón para descargar el prefijo indicado del mes elegido. "
-                "Se descartan las partidas que no empiezan con jugadas legales."
+                "Pulsa el botón para descargar el prefijo indicado de **cada mes "
+                "seleccionado**. Se descartan las partidas que no empiezan con jugadas "
+                "legales."
             ),
             games_button,
         ]
@@ -181,43 +410,138 @@ def _(mo):
 
 @app.cell
 def _(
+    LichessConnectionError,
     games_button,
     games_sample_url,
     max_games,
     mo,
-    month,
+    month_label,
+    months_selected,
     parse_pgn_sample_df,
-    year,
+    pl,
 ):
     mo.stop(
         not games_button.value,
         mo.md("Pulsa **Leer partidas oficiales** para cargar la muestra."),
     )
-    games_source = games_sample_url(int(year.value), int(month.value))
-    raw_games = parse_pgn_sample_df(games_source, max_games=int(max_games.value))
-    mo.callout(
-        mo.md(
-            f"Leídas **{raw_games.height:,}** partidas de `{games_source}` "
-            f"({int(max_games.value):,} bloques PGN solicitados)."
+    mo.stop(
+        not months_selected,
+        mo.callout(
+            mo.md("No hay meses con archivo en la selección actual."), kind="warn"
         ),
-        kind="success",
     )
+    frames = []
+    monthly_rows = []
+    skipped_months = []
+    _failures = []
+    with mo.status.spinner(title="Leyendo los meses seleccionados…") as _spinner:
+        for _game_year, _game_month in months_selected:
+            source = games_sample_url(_game_year, _game_month)
+            _spinner.update(subtitle=f"Leyendo `{source.rsplit('/', 1)[-1]}`…")
+            try:
+                month_frame = parse_pgn_sample_df(
+                    source, max_games=int(max_games.value)
+                )
+            except LichessConnectionError as exc:
+                skipped_months.append(month_label((_game_year, _game_month)))
+                _failures.append(str(exc))
+                continue
+            frames.append(month_frame)
+            monthly_rows.append(
+                {
+                    "Año": _game_year,
+                    "Mes": _game_month,
+                    "Partidas": month_frame.height,
+                }
+            )
+    mo.stop(
+        not frames,
+        mo.callout(
+            mo.md(
+                "No se pudo leer ningún mes seleccionado.\n\n"
+                + "\n".join(f"- {failure}" for failure in _failures)
+            ),
+            kind="danger",
+        ),
+    )
+    raw_games = pl.concat(frames)
+    _blocks = [
+        mo.callout(
+            mo.md(
+                f"Leídas **{raw_games.height:,}** partidas de "
+                f"**{len(frames)}** meses "
+                f"({int(max_games.value):,} bloques PGN solicitados por mes)."
+            ),
+            kind="success",
+        ),
+        mo.ui.table(pl.DataFrame(monthly_rows), pagination=False),
+    ]
+    if skipped_months:
+        _blocks.append(
+            mo.callout(
+                mo.md(
+                    "Meses que no se pudieron leer y se omiten: "
+                    + ", ".join(f"`{month}`" for month in skipped_months)
+                    + ".\n\n"
+                    + "\n".join(f"- {failure}" for failure in _failures)
+                ),
+                kind="warn",
+            )
+        )
+    mo.vstack(_blocks)
     return (raw_games,)
 
 
 @app.cell
-def _(RAW_DIR, download_to_disk, games_sample_url, keep_raw, mo, month, year):
+def _(
+    LichessConnectionError,
+    RAW_DIR,
+    download_to_disk,
+    games_sample_url,
+    keep_raw,
+    mo,
+    month_label,
+    months_selected,
+    raw_button,
+):
     mo.stop(
         not keep_raw.value,
-        mo.md("El archivo `.zst` no se guarda (casilla desactivada)."),
+        mo.md("Los archivos `.zst` no se guardan (casilla desactivada)."),
     )
-    raw_target = RAW_DIR / f"lichess_{int(year.value)}-{int(month.value):02d}.pgn.zst"
-    saved_path = download_to_disk(
-        games_sample_url(int(year.value), int(month.value)),
-        raw_target,
-        max_bytes=100_000_000,
+    mo.stop(
+        not raw_button.value,
+        mo.md("Pulsa **Guardar los .zst seleccionados** para descargarlos."),
     )
-    mo.md(f"Guardado un prefijo del archivo en `{saved_path}`.")
+    mo.stop(
+        not months_selected,
+        mo.callout(mo.md("No hay meses seleccionados que descargar."), kind="warn"),
+    )
+    budget = max(1_000_000, 100_000_000 // len(months_selected))
+    saved_paths = []
+    _failures = []
+    with mo.status.spinner(title="Guardando prefijos de los .zst…") as _spinner:
+        for _game_year, _game_month in months_selected:
+            _label = month_label((_game_year, _game_month))
+            _spinner.update(subtitle=f"Descargando `{_label}`…")
+            try:
+                saved_paths.append(
+                    download_to_disk(
+                        games_sample_url(_game_year, _game_month),
+                        RAW_DIR / f"lichess_{_label}.pgn.zst",
+                        max_bytes=budget,
+                    )
+                )
+            except LichessConnectionError as exc:
+                _failures.append(f"`{_label}`: {exc}")
+    message = (
+        f"Guardados **{len(saved_paths)}** prefijos de ~{budget / 1_000_000:.1f} MB "
+        f"({budget * len(saved_paths) / 1_000_000:.0f} MB en total) en `{RAW_DIR}`."
+    )
+    if saved_paths:
+        message += "\n\n" + "\n".join(f"- `{path.name}`" for path in saved_paths)
+    if _failures:
+        message += "\n\nFallaron:\n" + "\n".join(f"- {failure}" for failure in _failures)
+    mo.md(message)
     return
 
 
@@ -529,8 +853,10 @@ def _(mo):
 
     Los tres Parquet de `data/processed/` alimentan los otros dos cuadernos:
 
-    - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1).
-    - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_model_maia_pretrained.py`.
+    - `positions_games_sample.parquet` -> `02_model_scratch_and_finetune.py` (etapa 1)
+      y `03_maia.py` (modelo A, LoRA con jugadas humanas).
+    - `evals_clean_sample.parquet` -> `02_...` (etapa 2) y `03_maia.py` (modelo B,
+      LoRA con jugadas de Stockfish).
 
     Para el servidor final se procesa por bloques (streaming -> Parquet) y se
     entrena con un dataset iterable; la lógica de parseo no cambia.

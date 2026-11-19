@@ -25,19 +25,46 @@ por git).
 | Cuaderno | Contenido | Salidas |
 |---|---|---|
 | `notebooks/01_eda_and_cleaning.py` | Exploración y limpieza de partidas `.pgn.zst` y evaluaciones `lichess_db_eval.jsonl.zst` | `games_clean_sample.parquet`, `positions_games_sample.parquet`, `evals_clean_sample.parquet` |
-| `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y ajustada con jugadas de Stockfish | `approach1_stage1_scratch.pt`, `approach1_stage2_finetuned.pt` |
-| `notebooks/03_model_maia_pretrained.py` | **Enfoque 3**: red residual estilo Maia, comparada con el enfoque 1 en la misma validación | `approach3_maia_finetuned.pt` |
+| `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y dos ajustes finos con Stockfish (todos los pesos y LoRA en la cabeza) | `approach1_scratch.pt`, `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt` |
+| `notebooks/03_maia.py` | **Enfoque 3**: Maia-3 preentrenado ajustado con LoRA; un modelo con jugadas humanas y otro con jugadas de Stockfish | `maia3_lora_human.pt`, `maia3_lora_stockfish.pt` |
+| `notebooks/04_model_playground.py` | **Prueba visual**: detecta todos los `.pt`/`.pth` bajo `data/models/` (incluidas subcarpetas) y compara las jugadas de los checkpoints elegidos en un FEN o en una partida guardada; no entrena | — |
 
 Ejecuta los cuadernos en orden:
 
 ```bash
 uv run marimo edit notebooks/01_eda_and_cleaning.py
 uv run marimo edit notebooks/02_model_scratch_and_finetune.py
-uv run marimo edit notebooks/03_model_maia_pretrained.py
+uv run marimo edit notebooks/03_maia.py
+uv run marimo edit notebooks/04_model_playground.py
 ```
 
 Los cuadernos 2 y 3 generan una muestra pequeña por su cuenta si los Parquet
-del cuaderno 1 todavía no existen.
+del cuaderno 1 todavía no existen. El cuaderno 4 detecta cualquier archivo
+`.pt` o `.pth` que guardes bajo `data/models/`, incluidas subcarpetas, y permite
+elegir cuáles comparar; las posiciones de partidas guardadas solo sirven para
+inspección visual, no como una medida independiente de exactitud.
+
+### Enfoque 3: Maia-3 + LoRA
+
+`03_maia.py` descarga el [Maia-3](https://github.com/CSSLab/maia3) oficial
+(5M o 23M parámetros) desde Hugging Face a `data/models/maia3/`, congela sus
+pesos y entrena adaptadores LoRA (unos 100 mil parámetros con rango 8) sobre
+el MLP de cada bloque y la cabeza de jugadas. Se entrenan dos adaptadores
+independientes, ambos a partir del mismo Maia-3:
+
+- **A · humano**: `positions_games_sample.parquet` (`fen` → `move_uci`).
+- **B · Stockfish**: `evals_clean_sample.parquet` (`fen` → `best_move`).
+
+El cuaderno compara los dos contra Maia-3 sin ajustar en un conjunto de
+prueba que no se usa para entrenar ni para elegir la época. También se puede
+ejecutar sin interfaz, y entonces entrena directamente:
+
+```bash
+uv run python notebooks/03_maia.py
+```
+
+La lógica está en `src/lichess_pipeline/model/maia3_lora.py`. El código de
+Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
 
 ### Cómo funciona el modelo de jugadas
 
@@ -49,9 +76,21 @@ del cuaderno 1 todavía no existen.
 - **Legalidad**: antes del `softmax` se enmascaran las jugadas ilegales con
   `python-chess`, así que el modelo solo puede equivocarse de elección, nunca
   proponer una jugada ilegal.
-- **Dos etapas**: primero aprende de jugadas humanas de Elo alto; después se
-  ajusta con las mejores jugadas de Stockfish. La tabla de resultados de cada
-  cuaderno compara Top-1 y Top-3 antes y después del ajuste.
+- **Dos ajustes finos opcionales**: después del entrenamiento desde cero se
+  prueban dos formas de especializar el modelo con Stockfish. Ajustar todos los
+  pesos puede deshacer parte de lo aprendido con una muestra pequeña, así que
+  también se ofrece **LoRA**: la red se congela y solo se entrena una corrección
+  de bajo rango sobre la cabeza de jugadas, conservando la época con la menor
+  pérdida de validación. El cuaderno compara los tres modelos y guarda cada uno
+  por separado (`approach1_scratch.pt`, `approach1_weight_ftuning.pt`,
+  `approach1_lora_ftuning.pt`). El adaptador LoRA se fusiona antes de guardar,
+  así que ese archivo se carga como un `ChessPolicyNet` normal.
+- **Evaluación**: se reserva un **20 % de prueba** que no se toca hasta el final.
+  El 80 % restante (desarrollo) se mide con **validación cruzada de 5
+  particiones**, agrupando partidas completas por `game_id` para que la
+  validación no contenga posiciones casi idénticas a las de entrenamiento. Con
+  los resultados de la cruzada se eligen los ajustes, se reajustan los tres
+  modelos con todo el desarrollo y se evalúan una sola vez en la prueba.
 
 Para el servidor final no basta con subir los números: el pipeline actual
 materializa las muestras en memoria (listas de Python y DataFrames completos,
@@ -145,7 +184,7 @@ de jugadas:
 ```bash
 uv run python scripts/live_chess_fen.py \
   --weights data/models/chess-pieces.pt \
-  --move-model data/models/approach1_stage2_finetuned.pt \
+  --move-model data/models/approach1_lora_ftuning.pt \
   --architecture scratch --turn w --castling KQkq
 ```
 

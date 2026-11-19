@@ -12,9 +12,16 @@ has been consumed.
 
 from __future__ import annotations
 
+import http.client
 import io
+import re
+import socket
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from datetime import date, timedelta
 from pathlib import Path
 
 import zstandard as zstd
@@ -23,9 +30,20 @@ OFFICIAL_GAMES_URL_TEMPLATE = (
     "https://database.lichess.org/standard/"
     "lichess_db_standard_rated_{year:04d}-{month:02d}.pgn.zst"
 )
+OFFICIAL_GAMES_INDEX_URL = "https://database.lichess.org/standard/"
 OFFICIAL_EVALS_URL = "https://database.lichess.org/lichess_db_eval.jsonl.zst"
+FIRST_GAMES_YEAR = 2013
+_GAMES_INDEX_RE = re.compile(
+    r"lichess_db_standard_rated_(\d{4})-(\d{2})\.pgn\.zst(?!\.torrent)"
+)
 PGN_RESULT_TOKENS = ("1-0", "0-1", "1/2-1/2")
 DOWNLOAD_CHUNK_BYTES = 1 << 20
+OPEN_ATTEMPTS = 3
+OPEN_BACKOFF_SECONDS = 0.75
+
+
+class LichessConnectionError(RuntimeError):
+    """Raised when the official Lichess files cannot be reached."""
 
 
 def games_month_url(year: int, month: int) -> str:
@@ -33,14 +51,134 @@ def games_month_url(year: int, month: int) -> str:
     return OFFICIAL_GAMES_URL_TEMPLATE.format(year=year, month=month)
 
 
+def available_game_months(timeout: int = 60) -> list[tuple[int, int]]:
+    """Months with an official standard games archive, oldest first.
+
+    Reads the directory index of ``database.lichess.org/standard/`` (a few
+    dozen KB) instead of probing every month, so discovering availability
+    costs one request.
+    """
+    try:
+        with _urlopen(OFFICIAL_GAMES_INDEX_URL, timeout=timeout) as response:
+            html = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raise _http_error(OFFICIAL_GAMES_INDEX_URL, exc) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise LichessConnectionError(
+            f"No se pudo leer el índice de «{OFFICIAL_GAMES_INDEX_URL}»: {exc}."
+        ) from exc
+    months = sorted(
+        {(int(year), int(month)) for year, month in _GAMES_INDEX_RE.findall(html)}
+    )
+    if not months:
+        raise LichessConnectionError(
+            f"El índice de «{OFFICIAL_GAMES_INDEX_URL}» no listó ningún "
+            "archivo .pgn.zst."
+        )
+    return months
+
+
+def months_in_range(
+    year_range: Sequence[int],
+    month_range: Sequence[int],
+    available: Sequence[tuple[int, int]],
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Cross a year range with a month range, splitting available from missing.
+
+    ``year_range=(2020, 2022)`` and ``month_range=(3, 9)`` yield every month
+    from March to September of 2020, 2021 and 2022. Months without an archive
+    are returned separately so the caller can report them instead of failing.
+    """
+    first_year, last_year = sorted(year_range)
+    first_month, last_month = sorted(month_range)
+    present = set(available)
+    selected: list[tuple[int, int]] = []
+    missing: list[tuple[int, int]] = []
+    for year in range(first_year, last_year + 1):
+        for month in range(first_month, last_month + 1):
+            (selected if (year, month) in present else missing).append((year, month))
+    return selected, missing
+
+
+def last_closed_month(today: date | None = None) -> tuple[int, int]:
+    """Year and month of the most recent month that has already ended."""
+    reference = today or date.today()
+    previous = reference.replace(day=1) - timedelta(days=1)
+    return previous.year, previous.month
+
+
+def assumed_game_months(today: date | None = None) -> list[tuple[int, int]]:
+    """Continuous 2013-01 to the last closed month.
+
+    Fallback for when the index cannot be reached: Lichess has published every
+    month since 2013, so assuming a continuous range is right for all but the
+    newest month.
+    """
+    last_year, last_month = last_closed_month(today)
+    return [
+        (year, month)
+        for year in range(FIRST_GAMES_YEAR, last_year + 1)
+        for month in range(1, 13)
+        if (year, month) <= (last_year, last_month)
+    ]
+
+
 def is_remote(source: str | Path) -> bool:
     """True when ``source`` is an HTTP(S) URL instead of a local path."""
     return str(source).startswith(("http://", "https://"))
 
 
+def _is_transient(reason: object) -> bool:
+    """True for network errors worth retrying (DNS, timeouts, resets)."""
+    return isinstance(reason, (socket.gaierror, TimeoutError, ConnectionError))
+
+
+def _connection_message(url: str, reason: object) -> str:
+    host = urllib.parse.urlsplit(url).hostname or url
+    if isinstance(reason, socket.gaierror):
+        return (
+            f"No se pudo resolver el host «{host}»: {reason}. "
+            "Revisa la conexión a internet, el DNS o la VPN y vuelve a intentarlo."
+        )
+    return f"No se pudo conectar con «{url}»: {reason}. Vuelve a intentarlo."
+
+
+def _http_error(url: str, exc: urllib.error.HTTPError) -> LichessConnectionError:
+    """Uniform error for a file the server refuses to serve (for example a 404)."""
+    return LichessConnectionError(
+        f"«{url}» respondió {exc.code} {exc.reason}. "
+        "Comprueba que el archivo exista y vuelve a intentarlo."
+    )
+
+
+def _urlopen(url: str, timeout: int = 60) -> io.IOBase:
+    """Open ``url``, retrying transient DNS/connection failures.
+
+    A failed ``getaddrinfo`` is common right after a sleep/wake or a network
+    change; retrying briefly avoids surfacing it as a crash in the notebooks.
+    """
+    for attempt in range(1, OPEN_ATTEMPTS + 1):
+        try:
+            return urllib.request.urlopen(url, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as exc:
+            if not _is_transient(exc.reason):
+                raise
+            if attempt == OPEN_ATTEMPTS:
+                raise LichessConnectionError(
+                    _connection_message(url, exc.reason)
+                ) from exc
+            time.sleep(OPEN_BACKOFF_SECONDS * attempt)
+    raise AssertionError("unreachable")
+
+
 def _open_binary(source: str | Path) -> io.IOBase:
     if is_remote(source):
-        return urllib.request.urlopen(str(source), timeout=60)
+        try:
+            return _urlopen(str(source))
+        except urllib.error.HTTPError as exc:
+            raise _http_error(str(source), exc) from exc
     return open(source, "rb")
 
 
@@ -110,7 +248,11 @@ def download_to_disk(url: str, dest_path: Path, max_bytes: int | None = None) ->
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with urllib.request.urlopen(url, timeout=60) as response, dest_path.open("wb") as out:
+    try:
+        response_context = _urlopen(url)
+    except urllib.error.HTTPError as exc:
+        raise _http_error(url, exc) from exc
+    with response_context as response, dest_path.open("wb") as out:
         while max_bytes is None or written < max_bytes:
             chunk = response.read(DOWNLOAD_CHUNK_BYTES)
             if not chunk:

@@ -66,14 +66,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    MODELS_DIR,
-    PROJECT_DIR,
-    datetime,
-    discover_policy_checkpoints,
-    mo,
-    pl,
-):
+def _(MODELS_DIR, PROJECT_DIR, datetime, discover_policy_checkpoints, mo, pl):
     checkpoints = discover_policy_checkpoints(MODELS_DIR)
     if checkpoints:
         checkpoint_table = pl.DataFrame(
@@ -94,24 +87,13 @@ def _(
                 ],
             }
         )
-        checkpoint_choice = mo.ui.multiselect(
-            options=list(checkpoints),
-            value=list(checkpoints),
-            label="Checkpoints a comparar (solo estos se cargan en memoria)",
-        )
         checkpoint_view = mo.vstack(
             [
                 mo.md("## Checkpoints encontrados"),
                 mo.ui.table(checkpoint_table, pagination=False),
-                checkpoint_choice,
             ]
         )
     else:
-        checkpoint_choice = mo.ui.multiselect(
-            options=["Sin checkpoints"],
-            value=[],
-            label="Checkpoints a comparar",
-        )
         checkpoint_view = mo.callout(
             mo.md(
                 "No se encontró ningún archivo `.pt` o `.pth` dentro de "
@@ -121,7 +103,7 @@ def _(
             kind="warn",
         )
     checkpoint_view
-    return checkpoints, checkpoint_choice
+    return (checkpoints,)
 
 
 @app.cell
@@ -174,14 +156,9 @@ def _(POSITIONS_PATH, mo, pl):
 
 
 @app.cell
-def _(checkpoint_choice, checkpoints, chess, games_df, mo):
-    _selected = {
-        label: checkpoints[label]
-        for label in checkpoint_choice.value
-        if label in checkpoints
-    }
-    if _selected:
-        _labels = list(_selected)
+def _(checkpoints, chess, games_df, mo):
+    if checkpoints:
+        _labels = list(checkpoints)
         _default_model = next(
             (label for label in _labels if "lora" in label.lower()), _labels[0]
         )
@@ -192,8 +169,8 @@ def _(checkpoint_choice, checkpoints, chess, games_df, mo):
         )
     else:
         model_choice = mo.ui.dropdown(
-            options=["Selecciona al menos un checkpoint"],
-            value="Selecciona al menos un checkpoint",
+            options=["Sin checkpoints"],
+            value="Sin checkpoints",
             label="Modelo cuya flecha se dibuja en el tablero",
         )
 
@@ -352,11 +329,30 @@ def _(
 
 
 @app.cell
+def _(checkpoints, mo):
+    if checkpoints:
+        _labels = list(checkpoints)
+        comparison_choice = mo.ui.multiselect(
+            options=_labels,
+            value=_labels[:3],
+            label="Modelos en la tabla",
+        )
+    else:
+        comparison_choice = mo.ui.multiselect(
+            options=["Sin checkpoints"],
+            value=[],
+            label="Modelos en la tabla",
+        )
+    comparison_choice
+    return (comparison_choice,)
+
+
+@app.cell
 def _(
     board,
-    checkpoint_choice,
     checkpoints,
     chess,
+    comparison_choice,
     fen,
     load_cached,
     mo,
@@ -366,26 +362,24 @@ def _(
     predict_top_moves,
     source,
 ):
-    selected_checkpoints = {
-        label: checkpoints[label]
-        for label in checkpoint_choice.value
-        if label in checkpoints
-    }
+    compared = [label for label in comparison_choice.value if label in checkpoints]
+    _to_load = list(dict.fromkeys([*compared, model_choice.value]))
+    _to_load = [label for label in _to_load if label in checkpoints]
     mo.stop(
-        not selected_checkpoints,
+        not _to_load,
         mo.callout(
             mo.md(
-                "Selecciona al menos un checkpoint en la tabla de arriba para "
-                "dibujar el tablero y comparar jugadas."
+                "No hay checkpoints disponibles. Guarda un `.pt` o `.pth` "
+                "dentro de `data/models/` y recarga el cuaderno."
             ),
             kind="warn",
         ),
     )
     models = {}
     load_errors = []
-    for label, path in selected_checkpoints.items():
+    for label in _to_load:
         try:
-            models[label] = load_cached(path)
+            models[label] = load_cached(checkpoints[label])
         except (RuntimeError, FileNotFoundError) as error:
             load_errors.append(f"- **{label}**: {error}")
     mo.stop(
@@ -398,6 +392,7 @@ def _(
     predictions = {
         label: predict_top_moves(model, fen, top_k=3) for label, model in models.items()
     }
+    table_labels = [label for label in compared if label in predictions]
     selected_label = model_choice.value
     if selected_label not in predictions:
         selected_label = next(iter(predictions))
@@ -428,51 +423,62 @@ def _(
         else:
             _played_note = "no aparece en el top-3 del modelo"
 
-    _rows = []
-    for rank in range(3):
-        row = {"#": rank + 1}
-        for label, moves in predictions.items():
-            row[label] = (
-                f"{moves[rank][0]} · {100 * moves[rank][1]:.1f} %"
-                if rank < len(moves)
-                else "—"
-            )
-        _rows.append(row)
-    prediction_table = pl.DataFrame(_rows)
+    if table_labels:
+        _rows = []
+        for rank in range(3):
+            row = {"#": rank + 1}
+            for label in table_labels:
+                moves = predictions[label]
+                row[label] = (
+                    f"{moves[rank][0]} · {100 * moves[rank][1]:.1f} %"
+                    if rank < len(moves)
+                    else "—"
+                )
+            _rows.append(row)
+        _table_view = mo.ui.table(pl.DataFrame(_rows), pagination=False)
+        _table_note = mo.md(
+            "Cada columna muestra las tres jugadas legales más probables de un "
+            "modelo. Las probabilidades se reparten solo entre jugadas legales."
+        )
+    else:
+        _table_view = mo.callout(
+            mo.md(
+                "Selecciona al menos un modelo en "
+                "«Modelos que aparecen en la tabla de comparación»."
+            ),
+            kind="warn",
+        )
+        _table_note = mo.md("")
 
-    _details = [
+    _summary = [
+        mo.Html(str(board_svg)),
         mo.md(f"**Posición:** `{fen}`"),
         mo.md(f"**Flecha azul:** mejor jugada de *{selected_label}*"),
     ]
     if load_errors:
-        _details.insert(
-            0,
+        _summary.append(
             mo.callout(
                 mo.md(
                     "Estos checkpoints no se pudieron cargar y se omiten:\n\n"
                     + "\n".join(load_errors)
                 ),
                 kind="warn",
-            ),
+            )
         )
     if source.value == "Partida guardada":
-        _details.append(
+        _summary.append(
             mo.md(
                 f"**Jugada jugada:** `{played_move}` · {_played_note} "
                 "(flecha verde cuando es legal)."
             )
         )
-    _details.append(mo.ui.table(prediction_table, pagination=False))
-    _details.append(
-        mo.md(
-            "Cada columna muestra las tres jugadas legales más probables de un "
-            "modelo. Las probabilidades se reparten solo entre jugadas legales."
-        )
-    )
 
-    mo.hstack(
-        [mo.Html(str(board_svg)), mo.vstack(_details)],
-        justify="start",
+    mo.vstack(
+        [
+            *_summary,
+            _table_view,
+            _table_note,
+        ]
     )
     return
 

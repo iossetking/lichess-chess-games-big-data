@@ -450,13 +450,17 @@ def _(
         )
         _table_note = mo.md("")
 
-    _summary = [
-        mo.Html(str(board_svg)),
+    _board_column = [
+        mo.Html(
+            str(board_svg).replace(
+                "<svg ", '<svg style="max-width:100%;height:auto" ', 1
+            )
+        ),
         mo.md(f"**Posición:** `{fen}`"),
         mo.md(f"**Flecha azul:** mejor jugada de *{selected_label}*"),
     ]
     if load_errors:
-        _summary.append(
+        _board_column.append(
             mo.callout(
                 mo.md(
                     "Estos checkpoints no se pudieron cargar y se omiten:\n\n"
@@ -466,19 +470,21 @@ def _(
             )
         )
     if source.value == "Partida guardada":
-        _summary.append(
+        _board_column.append(
             mo.md(
                 f"**Jugada jugada:** `{played_move}` · {_played_note} "
                 "(flecha verde cuando es legal)."
             )
         )
 
-    mo.vstack(
+    mo.hstack(
         [
-            *_summary,
-            _table_view,
-            _table_note,
-        ]
+            mo.vstack(_board_column),
+            mo.vstack([_table_view, _table_note]),
+        ],
+        justify="start",
+        align="start",
+        wrap=True,
     )
     return
 

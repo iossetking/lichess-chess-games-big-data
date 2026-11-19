@@ -215,6 +215,8 @@ def _(evals_df, mo, positions_df):
         value="5 particiones",
         label="Validación cruzada",
     )
+    cv_weight = mo.ui.checkbox(value=True, label="Validar ajuste de pesos")
+    cv_lora = mo.ui.checkbox(value=True, label="Validar ajuste LoRA")
     train_button = mo.ui.run_button(label="Guardar parametros")
     mo.vstack(
         [
@@ -222,11 +224,13 @@ def _(evals_df, mo, positions_df):
             mo.hstack([max_human_positions, epochs_stage1], justify="start"),
             mo.hstack([max_eval_positions, epochs_stage2], justify="start"),
             mo.hstack([epochs_lora, lora_rank], justify="start"),
-            n_folds,
+            mo.hstack([n_folds, cv_weight, cv_lora], justify="start"),
             train_button,
         ]
     )
     return (
+        cv_lora,
+        cv_weight,
         epochs_lora,
         epochs_stage1,
         epochs_stage2,
@@ -308,28 +312,22 @@ def _(
     )
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Validación cruzada
+
+    Cada modelo tiene su propia celda. El modelo **desde cero** siempre se
+    entrena en cada partición, porque es la base que necesitan los dos ajustes
+    finos; los pesos de cada partición quedan en `data/models/cv/`. Los dos
+    ajustes finos se pueden desactivar por separado con las casillas de los
+    parámetros: así se entrena y valida solo lo que interesa.
+    """)
+    return
+
+
 @app.cell
-def _(
-    ChessPolicyNet,
-    apply_head_lora,
-    copy,
-    epochs_lora,
-    epochs_stage1,
-    epochs_stage2,
-    eval_dev_df,
-    evaluate_model,
-    human_dev_df,
-    kfold,
-    lora_rank,
-    make_tensor_dataset,
-    merge_head_lora,
-    mo,
-    n_folds,
-    pl,
-    plt,
-    train_head_lora,
-    train_model,
-):
+def _(eval_dev_df, human_dev_df, kfold, make_tensor_dataset, mo, n_folds, pl):
     _folds = int(n_folds.value)
     mo.stop(
         min(human_dev_df["game_id"].n_unique(), eval_dev_df.height) < _folds,
@@ -343,13 +341,14 @@ def _(
             kind="warn",
         ),
     )
-    _human_folds = kfold(human_dev_df, n_folds=_folds, group_col="game_id")
-    _eval_folds = kfold(eval_dev_df, n_folds=_folds)
-    _rows = []
-    _histories = {"Desde cero": [], "Ajuste de pesos": [], "Ajuste LoRA": []}
-    _monitor = None
+    human_cv_folds = kfold(human_dev_df, n_folds=_folds, group_col="game_id")
+    eval_cv_folds = kfold(eval_dev_df, n_folds=_folds)
+    human_monitor_ds = make_tensor_dataset(human_cv_folds[0][1])
+    eval_monitor_ds = make_tensor_dataset(
+        eval_cv_folds[0][1], "fen", "best_move"
+    )
 
-    def _row(fold, model, evaluation, metrics, best_epoch):
+    def cv_row(fold, model, evaluation, metrics, best_epoch):
         return {
             "Partición": fold,
             "Modelo": model,
@@ -360,105 +359,7 @@ def _(
             "Mejor época": best_epoch,
         }
 
-    for _fold, ((_h_train, _h_val), (_e_train, _e_val)) in enumerate(
-        zip(_human_folds, _eval_folds, strict=True), start=1
-    ):
-        _h_train_ds = make_tensor_dataset(_h_train)
-        _h_val_ds = make_tensor_dataset(_h_val)
-        _e_train_ds = make_tensor_dataset(_e_train, "fen", "best_move")
-        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
-
-        _scratch = ChessPolicyNet()
-        _scratch_history = train_model(
-            _scratch,
-            _h_train_ds,
-            _h_val_ds,
-            epochs=int(epochs_stage1.value),
-            lr=1e-3,
-            batch_size=128,
-        )
-        _histories["Desde cero"].append(pl.DataFrame(_scratch_history))
-        _rows.append(
-            _row(
-                _fold,
-                "Desde cero",
-                "Validación humana",
-                evaluate_model(_scratch, _h_val_ds, batch_size=128),
-                int(epochs_stage1.value),
-            )
-        )
-        _rows.append(
-            _row(
-                _fold,
-                "Desde cero",
-                "Validación Stockfish",
-                evaluate_model(_scratch, _e_val_ds, batch_size=128),
-                int(epochs_stage1.value),
-            )
-        )
-
-        _weight = ChessPolicyNet()
-        _weight.load_state_dict(_scratch.state_dict())
-        _weight_history = train_model(
-            _weight,
-            _e_train_ds,
-            _e_val_ds,
-            epochs=int(epochs_stage2.value),
-            lr=1e-4,
-            batch_size=128,
-        )
-        _histories["Ajuste de pesos"].append(pl.DataFrame(_weight_history))
-        _rows.append(
-            _row(
-                _fold,
-                "Ajuste de pesos",
-                "Validación Stockfish",
-                evaluate_model(_weight, _e_val_ds, batch_size=128),
-                int(epochs_stage2.value),
-            )
-        )
-
-        _rank = int(lora_rank.value)
-        _lora = apply_head_lora(
-            copy.deepcopy(_scratch), rank=_rank, alpha=2.0 * _rank
-        )
-        _lora_history = train_head_lora(
-            _lora,
-            _e_train_ds,
-            _e_val_ds,
-            epochs=int(epochs_lora.value),
-            lr=1e-3,
-            batch_size=128,
-        )
-        _histories["Ajuste LoRA"].append(pl.DataFrame(_lora_history))
-        _rows.append(
-            _row(
-                _fold,
-                "Ajuste LoRA",
-                "Validación Stockfish",
-                evaluate_model(
-                    merge_head_lora(_lora), _e_val_ds, batch_size=128
-                ),
-                _lora.best_epoch,
-            )
-        )
-
-        if _fold == 1:
-            _monitor = (_h_val_ds, _e_val_ds)
-
-    cv_frame = pl.DataFrame(_rows)
-    cv_summary = cv_frame.group_by(
-        ["Modelo", "Evaluación"], maintain_order=True
-    ).agg(
-        pl.col("Pérdida").mean().round(4).alias("Pérdida media"),
-        pl.col("Pérdida").std().round(4).alias("Pérdida desv."),
-        (100 * pl.col("Top-1")).mean().round(2).alias("Top-1 media (%)"),
-        (100 * pl.col("Top-1")).std().round(2).alias("Top-1 desv."),
-        (100 * pl.col("Top-3")).mean().round(2).alias("Top-3 media (%)"),
-        (100 * pl.col("Top-3")).std().round(2).alias("Top-3 desv."),
-    )
-
-    def _mean_history(frames):
+    def mean_history(frames):
         _stacked = pl.concat(
             [
                 frame.with_columns(pl.lit(index + 1).alias("Partición"))
@@ -476,73 +377,388 @@ def _(
             .sort("epoch")
         )
 
-    cv_curves = {name: _mean_history(frames) for name, frames in _histories.items()}
-    _lora_epochs = [
-        row["Mejor época"] for row in _rows if row["Modelo"] == "Ajuste LoRA"
-    ]
-    lora_epochs_refit = max(1, round(sum(_lora_epochs) / len(_lora_epochs)))
-    human_monitor_ds, eval_monitor_ds = _monitor
+    mo.md(
+        f"El desarrollo se reparte en **{_folds}** particiones. La primera "
+        "partición de validación también se usa para monitorizar los reajustes "
+        "finales."
+    )
+    return (
+        cv_row,
+        eval_cv_folds,
+        eval_monitor_ds,
+        human_cv_folds,
+        human_monitor_ds,
+        mean_history,
+    )
 
-    _cv_figure, _cv_axes = plt.subplots(1, 2, figsize=(13, 3.8))
-    _cv_axes[0].plot(
-        cv_curves["Desde cero"]["epoch"],
-        cv_curves["Desde cero"]["val_top1"],
-        marker="o",
-        label="Top-1",
-    )
-    _cv_axes[0].plot(
-        cv_curves["Desde cero"]["epoch"],
-        cv_curves["Desde cero"]["val_top3"],
-        marker="s",
-        label="Top-3",
-    )
-    _cv_axes[0].set(
-        title="Desde cero (validación humana)",
-        xlabel="Época",
-        ylabel="Fracción",
-        ylim=(0, 1),
-    )
-    _cv_axes[0].legend()
-    for _name, _color in (("Ajuste de pesos", "#d1603d"), ("Ajuste LoRA", "#2a78d4")):
-        _cv_axes[1].plot(
-            cv_curves[_name]["epoch"],
-            cv_curves[_name]["val_top1"],
-            marker="o",
-            color=_color,
-            label=f"{_name} · Top-1",
+
+@app.cell
+def _(
+    ChessPolicyNet,
+    MODELS_DIR,
+    cv_row,
+    epochs_stage1,
+    eval_cv_folds,
+    evaluate_model,
+    human_cv_folds,
+    make_tensor_dataset,
+    mean_history,
+    mo,
+    pl,
+    plt,
+    torch,
+    train_model,
+):
+    _cache_dir = MODELS_DIR / "cv"
+    _cache_dir.mkdir(parents=True, exist_ok=True)
+    _rows = []
+    _histories = []
+    scratch_fold_paths = []
+    for _fold, ((_h_train, _h_val), (_e_train, _e_val)) in enumerate(
+        zip(human_cv_folds, eval_cv_folds, strict=True), start=1
+    ):
+        _h_val_ds = make_tensor_dataset(_h_val)
+        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
+        _model = ChessPolicyNet()
+        _history = train_model(
+            _model,
+            make_tensor_dataset(_h_train),
+            _h_val_ds,
+            epochs=int(epochs_stage1.value),
+            lr=1e-3,
+            batch_size=128,
         )
-    _cv_axes[1].set(
-        title="Ajustes finos (validación Stockfish)",
+        _histories.append(pl.DataFrame(_history))
+        _fold_path = _cache_dir / f"scratch_fold{_fold}.pt"
+        torch.save(_model.state_dict(), _fold_path)
+        scratch_fold_paths.append(_fold_path)
+        _rows.append(
+            cv_row(
+                _fold,
+                "Desde cero",
+                "Validación humana",
+                evaluate_model(_model, _h_val_ds, batch_size=128),
+                int(epochs_stage1.value),
+            )
+        )
+        _rows.append(
+            cv_row(
+                _fold,
+                "Desde cero",
+                "Validación Stockfish",
+                evaluate_model(_model, _e_val_ds, batch_size=128),
+                int(epochs_stage1.value),
+            )
+        )
+    scratch_cv_frame = pl.DataFrame(_rows)
+    scratch_cv_curve = mean_history(_histories)
+    _human_rows = scratch_cv_frame.filter(
+        pl.col("Evaluación") == "Validación humana"
+    )
+
+    _table = scratch_cv_frame.select(
+        "Partición",
+        "Evaluación",
+        pl.col("Pérdida").round(4).alias("Pérdida"),
+        (100 * pl.col("Top-1")).round(2).alias("Top-1 (%)"),
+        (100 * pl.col("Top-3")).round(2).alias("Top-3 (%)"),
+    )
+    _figure, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
+    _axes[0].plot(
+        scratch_cv_curve["epoch"],
+        scratch_cv_curve["train_loss"],
+        marker="o",
+        label="entrenamiento",
+    )
+    _axes[0].plot(
+        scratch_cv_curve["epoch"],
+        scratch_cv_curve["val_loss"],
+        marker="s",
+        label="validación",
+    )
+    _axes[0].set(
+        title="Desde cero: pérdida media", xlabel="Época", ylabel="Cross-entropy"
+    )
+    _axes[0].legend()
+    _axes[1].plot(
+        scratch_cv_curve["epoch"], scratch_cv_curve["val_top1"], marker="o", label="Top-1"
+    )
+    _axes[1].plot(
+        scratch_cv_curve["epoch"], scratch_cv_curve["val_top3"], marker="s", label="Top-3"
+    )
+    _axes[1].set(
+        title="Desde cero: exactitud media",
         xlabel="Época",
         ylabel="Fracción",
         ylim=(0, 1),
     )
-    _cv_axes[1].legend(fontsize=8)
-    _cv_figure.tight_layout()
+    _axes[1].legend()
+    _figure.tight_layout()
 
     mo.vstack(
         [
-            mo.md(f"### Validación cruzada de {_folds} particiones"),
+            mo.md("### Desde cero"),
             mo.callout(
                 mo.md(
-                    "Cada partición entrena desde cero y mide en el quinto que quedó "
-                    "fuera. Las cifras son media y desviación entre particiones; el "
-                    "20 % de prueba no participa."
+                    "Media en validación humana: Top-1 "
+                    f"**{100 * _human_rows['Top-1'].mean():.2f} %** "
+                    f"(± {100 * _human_rows['Top-1'].std():.2f}) y Top-3 "
+                    f"**{100 * _human_rows['Top-3'].mean():.2f} %** "
+                    f"(± {100 * _human_rows['Top-3'].std():.2f}). Los pesos de cada "
+                    "partición se guardan en `data/models/cv/` para los ajustes finos."
                 ),
                 kind="info",
             ),
-            mo.ui.table(cv_summary, pagination=False),
-            _cv_figure,
+            mo.ui.table(_table, pagination=False),
+            _figure,
         ]
     )
     return (
-        cv_curves,
-        cv_frame,
-        cv_summary,
-        eval_monitor_ds,
-        human_monitor_ds,
-        lora_epochs_refit,
+        scratch_cv_curve,
+        scratch_cv_frame,
+        scratch_fold_paths,
     )
+
+
+@app.cell
+def _(
+    ChessPolicyNet,
+    MODELS_DIR,
+    cv_row,
+    cv_weight,
+    epochs_stage2,
+    eval_cv_folds,
+    evaluate_model,
+    make_tensor_dataset,
+    mean_history,
+    mo,
+    pl,
+    plt,
+    scratch_fold_paths,
+    torch,
+    train_model,
+):
+    mo.stop(
+        not cv_weight.value,
+        mo.callout(
+            mo.md(
+                "Ajuste de pesos desactivado en la validación cruzada. Actívalo en "
+                "los parámetros para entrenarlo."
+            ),
+            kind="info",
+        ),
+    )
+    _rows = []
+    _histories = []
+    for _fold, ((_e_train, _e_val), _fold_path) in enumerate(
+        zip(eval_cv_folds, scratch_fold_paths, strict=True), start=1
+    ):
+        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
+        _model = ChessPolicyNet()
+        _model.load_state_dict(
+            torch.load(_fold_path, map_location="cpu", weights_only=True)
+        )
+        _history = train_model(
+            _model,
+            make_tensor_dataset(_e_train, "fen", "best_move"),
+            _e_val_ds,
+            epochs=int(epochs_stage2.value),
+            lr=1e-4,
+            batch_size=128,
+        )
+        _histories.append(pl.DataFrame(_history))
+        _rows.append(
+            cv_row(
+                _fold,
+                "Ajuste de pesos",
+                "Validación Stockfish",
+                evaluate_model(_model, _e_val_ds, batch_size=128),
+                int(epochs_stage2.value),
+            )
+        )
+    weight_cv_frame = pl.DataFrame(_rows)
+    weight_cv_curve = mean_history(_histories)
+
+    _table = weight_cv_frame.select(
+        "Partición",
+        pl.col("Pérdida").round(4).alias("Pérdida"),
+        (100 * pl.col("Top-1")).round(2).alias("Top-1 (%)"),
+        (100 * pl.col("Top-3")).round(2).alias("Top-3 (%)"),
+    )
+    _figure, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
+    _axes[0].plot(
+        weight_cv_curve["epoch"],
+        weight_cv_curve["train_loss"],
+        marker="o",
+        label="entrenamiento",
+    )
+    _axes[0].plot(
+        weight_cv_curve["epoch"],
+        weight_cv_curve["val_loss"],
+        marker="s",
+        label="validación",
+    )
+    _axes[0].set(
+        title="Ajuste de pesos: pérdida media",
+        xlabel="Época",
+        ylabel="Cross-entropy",
+    )
+    _axes[0].legend()
+    _axes[1].plot(
+        weight_cv_curve["epoch"], weight_cv_curve["val_top1"], marker="o", label="Top-1"
+    )
+    _axes[1].plot(
+        weight_cv_curve["epoch"], weight_cv_curve["val_top3"], marker="s", label="Top-3"
+    )
+    _axes[1].set(
+        title="Ajuste de pesos: exactitud media",
+        xlabel="Época",
+        ylabel="Fracción",
+        ylim=(0, 1),
+    )
+    _axes[1].legend()
+    _figure.tight_layout()
+
+    mo.vstack(
+        [
+            mo.md("### Ajuste de pesos"),
+            mo.callout(
+                mo.md(
+                    "Media en validación Stockfish: Top-1 "
+                    f"**{100 * weight_cv_frame['Top-1'].mean():.2f} %** "
+                    f"(± {100 * weight_cv_frame['Top-1'].std():.2f}) y Top-3 "
+                    f"**{100 * weight_cv_frame['Top-3'].mean():.2f} %** "
+                    f"(± {100 * weight_cv_frame['Top-3'].std():.2f})."
+                ),
+                kind="info",
+            ),
+            mo.ui.table(_table, pagination=False),
+            _figure,
+        ]
+    )
+    return weight_cv_curve, weight_cv_frame
+
+
+@app.cell
+def _(
+    ChessPolicyNet,
+    apply_head_lora,
+    copy,
+    cv_lora,
+    cv_row,
+    epochs_lora,
+    eval_cv_folds,
+    evaluate_model,
+    lora_rank,
+    make_tensor_dataset,
+    mean_history,
+    merge_head_lora,
+    mo,
+    pl,
+    plt,
+    scratch_fold_paths,
+    torch,
+    train_head_lora,
+):
+    mo.stop(
+        not cv_lora.value,
+        mo.callout(
+            mo.md(
+                "Ajuste LoRA desactivado en la validación cruzada. Actívalo en los "
+                "parámetros para entrenarlo."
+            ),
+            kind="info",
+        ),
+    )
+    _rank = int(lora_rank.value)
+    _rows = []
+    _histories = []
+    for _fold, ((_e_train, _e_val), _fold_path) in enumerate(
+        zip(eval_cv_folds, scratch_fold_paths, strict=True), start=1
+    ):
+        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
+        _base = ChessPolicyNet()
+        _base.load_state_dict(
+            torch.load(_fold_path, map_location="cpu", weights_only=True)
+        )
+        _model = apply_head_lora(
+            copy.deepcopy(_base), rank=_rank, alpha=2.0 * _rank
+        )
+        _history = train_head_lora(
+            _model,
+            make_tensor_dataset(_e_train, "fen", "best_move"),
+            _e_val_ds,
+            epochs=int(epochs_lora.value),
+            lr=1e-3,
+            batch_size=128,
+        )
+        _histories.append(pl.DataFrame(_history))
+        _rows.append(
+            cv_row(
+                _fold,
+                "Ajuste LoRA",
+                "Validación Stockfish",
+                evaluate_model(
+                    merge_head_lora(_model), _e_val_ds, batch_size=128
+                ),
+                _model.best_epoch,
+            )
+        )
+    lora_cv_frame = pl.DataFrame(_rows)
+    lora_cv_curve = mean_history(_histories)
+
+    _table = lora_cv_frame.select(
+        "Partición",
+        "Mejor época",
+        pl.col("Pérdida").round(4).alias("Pérdida"),
+        (100 * pl.col("Top-1")).round(2).alias("Top-1 (%)"),
+        (100 * pl.col("Top-3")).round(2).alias("Top-3 (%)"),
+    )
+    _figure, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
+    _axes[0].plot(
+        lora_cv_curve["epoch"],
+        lora_cv_curve["train_loss"],
+        marker="o",
+        label="entrenamiento",
+    )
+    _axes[0].plot(
+        lora_cv_curve["epoch"],
+        lora_cv_curve["val_loss"],
+        marker="s",
+        label="validación",
+    )
+    _axes[0].set(title="LoRA: pérdida media", xlabel="Época", ylabel="Cross-entropy")
+    _axes[0].legend()
+    _axes[1].plot(
+        lora_cv_curve["epoch"], lora_cv_curve["val_top1"], marker="o", label="Top-1"
+    )
+    _axes[1].plot(
+        lora_cv_curve["epoch"], lora_cv_curve["val_top3"], marker="s", label="Top-3"
+    )
+    _axes[1].set(
+        title="LoRA: exactitud media", xlabel="Época", ylabel="Fracción", ylim=(0, 1)
+    )
+    _axes[1].legend()
+    _figure.tight_layout()
+
+    mo.vstack(
+        [
+            mo.md("### Ajuste LoRA"),
+            mo.callout(
+                mo.md(
+                    f"Rango {_rank}. Media en validación Stockfish: Top-1 "
+                    f"**{100 * lora_cv_frame['Top-1'].mean():.2f} %** "
+                    f"(± {100 * lora_cv_frame['Top-1'].std():.2f}) y Top-3 "
+                    f"**{100 * lora_cv_frame['Top-3'].mean():.2f} %** "
+                    f"(± {100 * lora_cv_frame['Top-3'].std():.2f})."
+                ),
+                kind="info",
+            ),
+            mo.ui.table(_table, pagination=False),
+            _figure,
+        ]
+    )
+    return lora_cv_curve, lora_cv_frame
 
 
 @app.cell
@@ -623,9 +839,9 @@ def _(
     apply_head_lora,
     copy,
     count_trainable_parameters,
+    epochs_lora,
     eval_dev_ds,
     eval_monitor_ds,
-    lora_epochs_refit,
     lora_rank,
     merge_head_lora,
     mo,
@@ -634,6 +850,7 @@ def _(
     train_head_lora,
 ):
     _rank = int(lora_rank.value)
+    _epochs = int(epochs_lora.value)
     lora_model = apply_head_lora(
         copy.deepcopy(scratch_model), rank=_rank, alpha=2.0 * _rank
     )
@@ -641,7 +858,7 @@ def _(
         lora_model,
         eval_dev_ds,
         eval_monitor_ds,
-        epochs=lora_epochs_refit,
+        epochs=_epochs,
         lr=1e-3,
         batch_size=128,
         keep_best=False,
@@ -656,9 +873,8 @@ def _(
                 mo.md(
                     f"Rango {_rank}: **{lora_trainable:,}** de {lora_total:,} "
                     f"parámetros ({100 * lora_trainable / lora_total:.2f} %). Se "
-                    f"entrena durante **{lora_epochs_refit}** épocas, el número "
-                    "elegido por la validación cruzada; no se selecciona época con "
-                    "el conjunto de prueba."
+                    f"entrena durante **{_epochs}** épocas, las del control de "
+                    "parámetros; la validación cruzada indica cuántas convienen."
                 ),
                 kind="info",
             ),
@@ -666,158 +882,19 @@ def _(
         ]
     )
     return lora_ft_model, lora_total, lora_trainable
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Resultados de la validación cruzada
-
-    Cada tabla muestra las particiones de un modelo y su curva media. La
-    validación de la etapa 1 usa jugadas humanas; los dos ajustes finos y la fila
-    de Stockfish de la etapa 1 usan jugadas de Stockfish.
-    """)
-    return
-
-
-@app.cell
-def _(cv_curves, cv_frame, mo, pl, plt):
-    _scratch_cv = cv_frame.filter(
-        (pl.col("Modelo") == "Desde cero")
-        & (pl.col("Evaluación") == "Validación humana")
-    )
-    _scratch_table = _scratch_cv.select(
-        "Partición",
-        pl.col("Pérdida").round(4).alias("Pérdida"),
-        (100 * pl.col("Top-1")).round(2).alias("Top-1 (%)"),
-        (100 * pl.col("Top-3")).round(2).alias("Top-3 (%)"),
-    )
-    _curve = cv_curves["Desde cero"]
-
-    _figure, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
-    _axes[0].plot(
-        _curve["epoch"], _curve["train_loss"], marker="o", label="entrenamiento"
-    )
-    _axes[0].plot(_curve["epoch"], _curve["val_loss"], marker="s", label="validación")
-    _axes[0].set(
-        title="Desde cero: pérdida media", xlabel="Época", ylabel="Cross-entropy"
-    )
-    _axes[0].legend()
-    _axes[1].plot(_curve["epoch"], _curve["val_top1"], marker="o", label="Top-1")
-    _axes[1].plot(_curve["epoch"], _curve["val_top3"], marker="s", label="Top-3")
-    _axes[1].set(
-        title="Desde cero: exactitud media",
-        xlabel="Época",
-        ylabel="Fracción",
-        ylim=(0, 1),
-    )
-    _axes[1].legend()
-    _figure.tight_layout()
-
-    mo.vstack(
-        [
-            mo.md("### Desde cero · jugadas humanas"),
-            mo.ui.table(_scratch_table, pagination=False),
-            _figure,
-        ]
-    )
-    return
-
-
-@app.cell
-def _(cv_curves, cv_frame, mo, pl, plt):
-    _weight_cv = cv_frame.filter(pl.col("Modelo") == "Ajuste de pesos")
-    _weight_table = _weight_cv.select(
-        "Partición",
-        pl.col("Pérdida").round(4).alias("Pérdida"),
-        (100 * pl.col("Top-1")).round(2).alias("Top-1 (%)"),
-        (100 * pl.col("Top-3")).round(2).alias("Top-3 (%)"),
-    )
-    _curve = cv_curves["Ajuste de pesos"]
-
-    _figure, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
-    _axes[0].plot(
-        _curve["epoch"], _curve["train_loss"], marker="o", label="entrenamiento"
-    )
-    _axes[0].plot(_curve["epoch"], _curve["val_loss"], marker="s", label="validación")
-    _axes[0].set(
-        title="Ajuste de pesos: pérdida media",
-        xlabel="Época",
-        ylabel="Cross-entropy",
-    )
-    _axes[0].legend()
-    _axes[1].plot(_curve["epoch"], _curve["val_top1"], marker="o", label="Top-1")
-    _axes[1].plot(_curve["epoch"], _curve["val_top3"], marker="s", label="Top-3")
-    _axes[1].set(
-        title="Ajuste de pesos: exactitud media",
-        xlabel="Época",
-        ylabel="Fracción",
-        ylim=(0, 1),
-    )
-    _axes[1].legend()
-    _figure.tight_layout()
-
-    mo.vstack(
-        [
-            mo.md("### Ajuste de pesos · jugadas de Stockfish"),
-            mo.ui.table(_weight_table, pagination=False),
-            _figure,
-        ]
-    )
-    return
-
-
-@app.cell
-def _(cv_curves, cv_frame, mo, pl, plt):
-    _lora_cv = cv_frame.filter(pl.col("Modelo") == "Ajuste LoRA")
-    _lora_table = _lora_cv.select(
-        "Partición",
-        "Mejor época",
-        pl.col("Pérdida").round(4).alias("Pérdida"),
-        (100 * pl.col("Top-1")).round(2).alias("Top-1 (%)"),
-        (100 * pl.col("Top-3")).round(2).alias("Top-3 (%)"),
-    )
-    _curve = cv_curves["Ajuste LoRA"]
-
-    _figure, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
-    _axes[0].plot(
-        _curve["epoch"], _curve["train_loss"], marker="o", label="entrenamiento"
-    )
-    _axes[0].plot(_curve["epoch"], _curve["val_loss"], marker="s", label="validación")
-    _axes[0].set(title="LoRA: pérdida media", xlabel="Época", ylabel="Cross-entropy")
-    _axes[0].legend()
-    _axes[1].plot(_curve["epoch"], _curve["val_top1"], marker="o", label="Top-1")
-    _axes[1].plot(_curve["epoch"], _curve["val_top3"], marker="s", label="Top-3")
-    _axes[1].set(
-        title="LoRA: exactitud media", xlabel="Época", ylabel="Fracción", ylim=(0, 1)
-    )
-    _axes[1].legend()
-    _figure.tight_layout()
-
-    mo.vstack(
-        [
-            mo.md("### Ajuste LoRA · jugadas de Stockfish"),
-            mo.ui.table(_lora_table, pagination=False),
-            _figure,
-        ]
-    )
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Comparación final
 
-    Arriba, la validación cruzada sobre el desarrollo. Abajo, una única
-    evaluación de los modelos reajustados en el 20 % de prueba.
+    Una única evaluación de los modelos reajustados en el 20 % de prueba. Las
+    medias y desviaciones de la validación cruzada están en cada celda de modelo.
     """)
     return
 
 
 @app.cell
 def _(
-    cv_summary,
     eval_test_ds,
     evaluate_model,
     human_test_ds,
@@ -896,8 +973,6 @@ def _(
     _delta_lora = 100 * (_lora_test["top1"] - _scratch_stockfish["top1"])
     mo.vstack(
         [
-            mo.md("### Validación cruzada (desarrollo)"),
-            mo.ui.table(cv_summary, pagination=False),
             mo.md("### Conjunto de prueba (una sola evaluación)"),
             mo.callout(
                 mo.md(
@@ -1134,11 +1209,6 @@ def _(
         ],
         justify="start",
     )
-    return
-
-
-@app.cell
-def _():
     return
 
 

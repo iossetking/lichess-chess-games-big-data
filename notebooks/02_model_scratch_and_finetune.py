@@ -513,17 +513,12 @@ def _(
             _figure,
         ]
     )
-    return (
-        scratch_cv_curve,
-        scratch_cv_frame,
-        scratch_fold_paths,
-    )
+    return (scratch_fold_paths,)
 
 
 @app.cell
 def _(
     ChessPolicyNet,
-    MODELS_DIR,
     cv_row,
     cv_weight,
     epochs_stage2,
@@ -636,7 +631,7 @@ def _(
             _figure,
         ]
     )
-    return weight_cv_curve, weight_cv_frame
+    return
 
 
 @app.cell
@@ -758,7 +753,7 @@ def _(
             _figure,
         ]
     )
-    return lora_cv_curve, lora_cv_frame
+    return
 
 
 @app.cell
@@ -882,6 +877,8 @@ def _(
         ]
     )
     return lora_ft_model, lora_total, lora_trainable
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -1209,6 +1206,11 @@ def _(
         ],
         justify="start",
     )
+    return
+
+
+@app.cell
+def _():
     return
 
 

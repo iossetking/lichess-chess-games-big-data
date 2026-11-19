@@ -32,7 +32,7 @@ def test_native_detection_projects_centre_or_base(monkeypatch, scene, expected_r
     camera = SimpleNamespace(sample=lambda: (frame.copy(), 1, live.perf_counter()))
     args = SimpleNamespace(size=800, turn="w", flip=False, stable_frames=1,
                            redetect_every=0, confidence=.55, imgsz=640,
-                           scene=scene, castling="-", en_passant="-", screen_board=False)
+                           scene=scene, castling="-", en_passant="-", screen_board=False, smooth=0.8)
     seen = []
 
     def detect(image, *args):
@@ -54,7 +54,7 @@ def test_pieces_are_displayed_without_finding_board(monkeypatch):
     camera = SimpleNamespace(sample=lambda: (frame.copy(), 1, live.perf_counter()))
     args = SimpleNamespace(size=800, turn="w", flip=False, stable_frames=1,
                            redetect_every=0, confidence=.55, imgsz=640,
-                           scene="2d", castling="-", en_passant="-", screen_board=False)
+                           scene="2d", castling="-", en_passant="-", screen_board=False, smooth=0.8)
     monkeypatch.setattr(live, "detect_board_corners", lambda frame: None)
 
     def detect(image, *args):

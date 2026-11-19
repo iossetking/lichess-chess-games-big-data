@@ -4,6 +4,8 @@ import pytest
 from lichess_pipeline.chess_vision import (
     FenStabilizer,
     PieceDetection,
+    PieceLabelSmoother,
+    box_iou,
     board_destination,
     detect_green_screen_board,
     detections_to_fen,
@@ -101,3 +103,41 @@ def test_validate_ordered_board_corners_accepts_a_convex_board():
 def test_validate_ordered_board_corners_rejects_crossed_click_order():
     with pytest.raises(ValueError, match="convex"):
         validate_ordered_board_corners(np.array([[10, 10], [80, 90], [90, 20], [15, 80]]))
+
+
+def _piece(label, confidence, box=(10, 10, 50, 90)):
+    return PieceDetection(label, confidence, box)
+
+
+def test_box_iou_basics():
+    assert box_iou((0, 0, 10, 10), (0, 0, 10, 10)) == pytest.approx(1.0)
+    assert box_iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+    assert box_iou((0, 0, 10, 10), (5, 0, 15, 10)) == pytest.approx(1 / 3)
+
+
+def test_label_smoother_ignores_a_single_misclassified_frame():
+    smoother = PieceLabelSmoother()
+    labels = [smoother.update([_piece(label, 0.8)])[0].label
+              for label in ("knight", "knight", "knight", "pawn", "knight")]
+    assert labels == ["knight"] * 5
+
+
+def test_label_smoother_follows_a_real_change_within_a_few_frames():
+    smoother = PieceLabelSmoother()
+    for _ in range(3):
+        smoother.update([_piece("knight", 0.8)])
+    labels = [smoother.update([_piece("rook", 0.9)])[0].label for _ in range(4)]
+    assert labels[0] == "knight" and labels[-1] == "rook"
+
+
+def test_label_smoother_tracks_pieces_independently_and_forgets_old_tracks():
+    smoother = PieceLabelSmoother(max_missing=2)
+    left, right = (0, 0, 40, 80), (200, 0, 240, 80)
+    for _ in range(3):
+        smoother.update([_piece("king", 0.9, left), _piece("pawn", 0.9, right)])
+    out = smoother.update([_piece("queen", 0.4, left), _piece("pawn", 0.9, right)])
+    assert [d.label for d in out] == ["king", "pawn"]
+    for _ in range(4):
+        smoother.update([])
+    # The old king track expired, so a new piece starts fresh.
+    assert smoother.update([_piece("queen", 0.4, left)])[0].label == "queen"

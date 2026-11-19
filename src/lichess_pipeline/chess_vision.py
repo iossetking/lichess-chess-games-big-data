@@ -241,6 +241,109 @@ def detections_to_fen(
     return f"{'/'.join(ranks)} {turn} {castling} {en_passant} 0 1"
 
 
+PIECE_CLASSES = ("bishop", "king", "knight", "pawn", "queen", "rook")
+
+
+def crop_piece(image: np.ndarray, xyxy: Sequence[float], size: int = 128, margin: float = 1.25) -> np.ndarray:
+    """Square, margin-padded crop around a detected piece, resized to ``size``.
+
+    Shared by training and inference so the classifier sees identical framing.
+    Pixels outside the frame are replicated from the border.
+    """
+    import cv2
+
+    x1, y1, x2, y2 = (float(v) for v in xyxy)
+    side = max(x2 - x1, y2 - y1, 4.0) * margin
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    # Map the square window onto the output with an affine warp: one call, handles borders.
+    scale = size / side
+    matrix = np.array([[scale, 0, size / 2 - cx * scale], [0, scale, size / 2 - cy * scale]], dtype=np.float32)
+    return cv2.warpAffine(image, matrix, (size, size), flags=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+def fuse_piece_probabilities(detector_label: str, detector_confidence: float, classifier_probs: Sequence[float],
+                             classifier_weight: float = 1.0) -> tuple[str, float]:
+    """Combine the detector's label with the crop classifier's distribution.
+
+    The detector contributes a vote of ``detector_confidence`` for its class;
+    the classifier contributes its full probability vector scaled by
+    ``classifier_weight``.  Returns the winning class and its normalised score.
+    """
+    scores = {name: classifier_weight * float(p) for name, p in zip(PIECE_CLASSES, classifier_probs)}
+    if detector_label in scores:
+        scores[detector_label] += detector_confidence
+    label = max(scores, key=scores.get)
+    return label, scores[label] / sum(scores.values())
+
+
+def box_iou(a: Sequence[float], b: Sequence[float]) -> float:
+    """Intersection over union of two ``(x1, y1, x2, y2)`` boxes."""
+    inter_w = min(a[2], b[2]) - max(a[0], b[0])
+    inter_h = min(a[3], b[3]) - max(a[1], b[1])
+    if inter_w <= 0 or inter_h <= 0:
+        return 0.0
+    inter = inter_w * inter_h
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+class PieceLabelSmoother:
+    """Stabilise the *type* of each piece across video frames.
+
+    A single frame can call a knight a pawn when the view is blurred or partly
+    hidden.  Each physical piece is followed from frame to frame (greedy IoU
+    matching) and the label shown is the confidence-weighted vote of its recent
+    frames, so one bad frame cannot flip the label while a real change (a piece
+    replaced on the same square) still wins within a few frames.
+
+    ``decay`` multiplies old votes every frame (0.8 means the last ~5 frames
+    dominate).  Tracks unseen for ``max_missing`` frames are dropped.  Only the
+    label is smoothed; boxes are always the current frame's boxes.
+    """
+
+    def __init__(self, decay: float = 0.8, min_iou: float = 0.3, max_missing: int = 5) -> None:
+        if not 0 < decay <= 1:
+            raise ValueError("decay must be in (0, 1]")
+        self.decay, self.min_iou, self.max_missing = decay, min_iou, max_missing
+        self._tracks: list[dict] = []
+
+    def update(self, detections: Sequence[PieceDetection]) -> list[PieceDetection]:
+        for track in self._tracks:
+            track["missing"] += 1
+            track["votes"] = {label: weight * self.decay for label, weight in track["votes"].items()}
+        pairs = sorted(
+            ((box_iou(track["box"], detection.xyxy), t, d)
+             for t, track in enumerate(self._tracks) for d, detection in enumerate(detections)),
+            reverse=True,
+        )
+        assigned: dict[int, int] = {}
+        used_tracks: set[int] = set()
+        for overlap, t, d in pairs:
+            if overlap < self.min_iou:
+                break
+            if t in used_tracks or d in assigned:
+                continue
+            used_tracks.add(t)
+            assigned[d] = t
+        smoothed: list[PieceDetection] = []
+        for d, detection in enumerate(detections):
+            if d in assigned:
+                track = self._tracks[assigned[d]]
+            else:
+                track = {"votes": {}, "box": detection.xyxy, "missing": 0}
+                self._tracks.append(track)
+            track["box"], track["missing"] = detection.xyxy, 0
+            track["votes"][detection.label] = track["votes"].get(detection.label, 0.0) + detection.confidence
+            label = max(track["votes"], key=track["votes"].get)
+            share = track["votes"][label] / sum(track["votes"].values())
+            # Report the winning label with a confidence that reflects agreement.
+            confidence = detection.confidence if label == detection.label else detection.confidence * share
+            smoothed.append(PieceDetection(label, confidence, detection.xyxy, detection.mask))
+        self._tracks = [track for track in self._tracks if track["missing"] <= self.max_missing]
+        return smoothed
+
+
 class FenStabilizer:
     """Publish a FEN only after it is unchanged for several video frames."""
 

@@ -30,7 +30,11 @@ from lichess_pipeline.chess_vision import (
     DEFAULT_BOARD_SIZE,
     FenStabilizer,
     PieceDetection,
+    PIECE_CLASSES,
+    PieceLabelSmoother,
     board_destination,
+    crop_piece,
+    fuse_piece_probabilities,
     detect_board_corners,
     detect_green_screen_board,
     detections_to_fen,
@@ -43,17 +47,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", type=Path, required=True, help="YOLO .pt/.onnx trained on six piece shapes or twelve coloured pieces")
     parser.add_argument("--board-weights", type=Path, help="Optional YOLO-seg model with a chessboard/board class")
+    parser.add_argument(
+        "--classifier",
+        type=Path,
+        default=Path("data/models/chess-piece-classifier.pt"),
+        help="Optional secondary piece crop classifier (YOLO-cls) for refined recognition",
+    )
     parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0)")
     parser.add_argument("--size", type=int, default=DEFAULT_BOARD_SIZE, help="Rectified board side in pixels")
-    parser.add_argument("--confidence", type=float, default=0.55, help="Minimum YOLO confidence")
+    parser.add_argument("--confidence", type=float, default=0.40, help="Minimum YOLO confidence")
     parser.add_argument(
         "--require-segmentation",
         action="store_true",
         help="Require a YOLO-seg checkpoint with one pixel mask per piece",
     )
-    parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference image size")
+    parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference image size (train size of the v2 model)")
+    parser.add_argument("--smooth", type=float, default=0.8,
+                        help="Per-piece label voting decay across frames (1 = keep all history, 0 disables)")
     parser.add_argument("--device", default=None, help="Inference device: cpu, mps or 0 (automatic if omitted)")
-    parser.add_argument("--scene", choices=("2d", "3d"), default="2d", help="Use box centre for 2D, base for physical 3D pieces")
+    parser.add_argument("--scene", choices=("2d", "3d", "auto"), default="auto",
+                        help="2d: box centre; 3d: box base (physical pieces); auto: pick per board (green screen board -> 2d, otherwise 3d)")
     parser.add_argument("--screen-board", action="store_true", help="Fast green/cream 2D screen board detection")
     parser.add_argument(
         "--redetect-every",
@@ -74,27 +87,59 @@ def parse_args() -> argparse.Namespace:
 class YoloPieceDetector:
     """Small adapter that avoids tying core vision code to Ultralytics types."""
 
-    def __init__(self, weights: Path, device: str | None = None) -> None:
+    def __init__(self, weights: Path, classifier_weights: Path | None = None, device: str | None = None) -> None:
         try:
             from ultralytics import YOLO
         except ImportError as error:
             raise RuntimeError("Falta Ultralytics. Ejecuta: uv add ultralytics") from error
         self.model = YOLO(weights)
+        self.classifier = YOLO(classifier_weights) if classifier_weights and classifier_weights.is_file() else None
         self.device = device
         self.is_segmentation = self.model.task == "segment"
 
+    def warmup(self, imgsz: int, shape: tuple[int, int] = (480, 640)) -> None:
+        """Compile/allocate the model before the first camera frame (removes the slow first prediction)."""
+        blank = np.zeros((*shape, 3), dtype=np.uint8)
+        for _ in range(2):
+            self.model.predict(blank, imgsz=imgsz, device=self.device, verbose=False)
+        if self.classifier is not None:
+            crop_blank = [np.zeros((128, 128, 3), dtype=np.uint8)]
+            for _ in range(2):
+                self.classifier.predict(crop_blank, imgsz=128, device=self.device, verbose=False)
+
     def detect(self, image: np.ndarray, confidence: float, imgsz: int) -> list[PieceDetection]:
-        result = self.model.predict(image, conf=confidence, imgsz=imgsz, device=self.device, verbose=False)[0]
-        if result.boxes is None:
+        # agnostic NMS keeps one box per physical piece, so the same piece can
+        # no longer appear as both "knight" and "pawn" at once.
+        result = self.model.predict(image, conf=confidence, imgsz=imgsz, device=self.device, verbose=False,
+                                    agnostic_nms=True, iou=0.5, max_det=64)[0]
+        if result.boxes is None or len(result.boxes) == 0:
             return []
         names: dict[int, str] = result.names
         polygons = result.masks.xy if result.masks is not None else []
+        boxes_xyxy = [tuple(float(value) for value in box.xyxy[0].tolist()) for box in result.boxes]
+        det_labels = [names[int(box.cls.item())] for box in result.boxes]
+        det_confs = [float(box.conf.item()) for box in result.boxes]
+
+        # Stage 2 crop classifier fusion if available
+        if self.classifier is not None and boxes_xyxy:
+            crops = [crop_piece(image, b, 128) for b in boxes_xyxy]
+            cls_results = self.classifier.predict(crops, imgsz=128, device=self.device, verbose=False)
+            refined_labels = []
+            refined_confs = []
+            for d_label, d_conf, c_res in zip(det_labels, det_confs, cls_results):
+                probs = [0.0] * len(PIECE_CLASSES)
+                for cid, cname in c_res.names.items():
+                    if cname in PIECE_CLASSES:
+                        probs[PIECE_CLASSES.index(cname)] = float(c_res.probs.data[cid])
+                f_label, f_conf = fuse_piece_probabilities(d_label, d_conf, probs, classifier_weight=1.5)
+                refined_labels.append(f_label)
+                refined_confs.append(f_conf)
+            det_labels, det_confs = refined_labels, refined_confs
+
         detections: list[PieceDetection] = []
-        for index, box in enumerate(result.boxes):
-            class_id = int(box.cls.item())
-            xyxy = tuple(float(value) for value in box.xyxy[0].tolist())
+        for index in range(len(boxes_xyxy)):
             mask = np.asarray(polygons[index], dtype=np.int32) if index < len(polygons) else None
-            detections.append(PieceDetection(names[class_id], float(box.conf.item()), xyxy, mask))
+            detections.append(PieceDetection(det_labels[index], det_confs[index], boxes_xyxy[index], mask))
         return detections
 
 
@@ -110,6 +155,9 @@ class LatestFrameCamera:
     def __init__(self, camera_index: int) -> None:
         self.capture = cv2.VideoCapture(camera_index)
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # 720p keeps small pieces legible; the model only sees imgsz pixels anyway.
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self._lock = Lock()
         self._frame: np.ndarray | None = None
         self._sequence = 0
@@ -198,9 +246,11 @@ class LiveInference:
     def _run(self) -> None:
         destination = board_destination(self.args.size)
         stabilizer = FenStabilizer(self.args.stable_frames)
+        smoother = PieceLabelSmoother(decay=self.args.smooth) if self.args.smooth > 0 else None
         processed = 0
         last_sequence = -1
         next_board_search = 0.0
+        scene = self.args.scene if self.args.scene != "auto" else "3d"
         while not self._stop.is_set():
             frame, sequence, captured_at = self.camera.sample()
             if frame is None or sequence == last_sequence:
@@ -209,6 +259,8 @@ class LiveInference:
             last_sequence = sequence
             started = perf_counter()
             detections = self.pieces.detect(frame, self.args.confidence, self.args.imgsz)
+            if smoother is not None:
+                detections = smoother.update(detections)
             annotated = frame.copy()
             draw_detections(annotated, detections)
             with self._lock:
@@ -217,9 +269,14 @@ class LiveInference:
             redetect = corners is None or (self.args.redetect_every > 0 and processed % self.args.redetect_every == 0)
             if redetect and started >= next_board_search:
                 next_board_search = started + 1.0
-                found = detect_green_screen_board(frame) if self.args.screen_board else None
+                auto = self.args.scene == "auto"
+                found = detect_green_screen_board(frame) if (self.args.screen_board or auto) else None
+                if found is not None and auto:
+                    scene = "2d"
                 if found is None:
                     found = detect_board_corners(frame)
+                    if found is not None and auto:
+                        scene = "3d"
                 if found is None and self.board_segmenter is not None:
                     found = self.board_segmenter.detect(frame, self.args.confidence, self.args.imgsz)
                 if found is not None:
@@ -230,7 +287,7 @@ class LiveInference:
                 for detection in detections:
                     x1, y1, x2, y2 = detection.xyxy
                     anchor = np.array([[[(x1 + x2) / 2,
-                                         y2 if self.args.scene == "3d" else (y1 + y2) / 2]]], dtype=np.float32)
+                                         y2 if scene == "3d" else (y1 + y2) / 2]]], dtype=np.float32)
                     x, y = cv2.perspectiveTransform(anchor, transform)[0, 0]
                     if flip:
                         x, y = self.args.size - 1 - x, self.args.size - 1 - y
@@ -364,7 +421,8 @@ def main() -> int:
         return 2
 
     try:
-        pieces = YoloPieceDetector(args.weights, args.device)
+        pieces = YoloPieceDetector(args.weights, args.classifier, args.device)
+        pieces.warmup(args.imgsz)
         if args.require_segmentation and not pieces.is_segmentation:
             raise RuntimeError("--require-segmentation needs YOLO-seg weights, not a detection checkpoint")
         board_segmenter = YoloBoardSegmenter(args.board_weights) if args.board_weights else None

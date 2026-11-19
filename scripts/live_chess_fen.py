@@ -2,7 +2,7 @@
 
 Example:
     uv run python scripts/live_chess_fen.py \
-      --weights data/models/chess-pieces.pt --move-model data/models/approach1_stage2_finetuned.pt
+      --weights data/models/chess-pieces.pt --move-model data/models/approach1_lora_ftuning.pt
 
 The piece checkpoint may use six shape classes (pawn, knight, bishop, rook,
 queen, king) or twelve coloured classes. FEN requires coloured classes.  An ordinary COCO YOLO checkpoint cannot

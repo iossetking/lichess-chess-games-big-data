@@ -43,30 +43,28 @@ def _():
 
 @app.cell(hide_code=True)
 def _(POLICY_CHECKPOINTS, mo):
-    mo.md(
-        rf"""
-        # 4. Prueba visual de los modelos de jugadas
+    mo.md(rf"""
+    # 4. Prueba visual de los modelos de jugadas
 
-        Carga los tres checkpoints del enfoque 1 y compara sus jugadas sin
-        volver a entrenar:
+    Carga los tres checkpoints del enfoque 1 y compara sus jugadas sin
+    volver a entrenar:
 
-        | Etiqueta | Archivo |
-        |---|---|
-        | Desde cero | `{POLICY_CHECKPOINTS["Desde cero"]}` |
-        | Ajuste de pesos | `{POLICY_CHECKPOINTS["Ajuste de pesos"]}` |
-        | Ajuste LoRA | `{POLICY_CHECKPOINTS["Ajuste LoRA"]}` |
+    | Etiqueta | Archivo |
+    |---|---|
+    | Desde cero | `{POLICY_CHECKPOINTS["Desde cero"]}` |
+    | Ajuste de pesos | `{POLICY_CHECKPOINTS["Ajuste de pesos"]}` |
+    | Ajuste LoRA | `{POLICY_CHECKPOINTS["Ajuste LoRA"]}` |
 
-        Se buscan en `data/models/` y, si no están, en `data/models/backups/`.
+    Se buscan en `data/models/` y, si no están, en `data/models/backups/`.
 
-        Hay dos formas de elegir la posición: escribir un **FEN** o recorrer una
-        **partida guardada** del Parquet del cuaderno 1. En la segunda vista
-        también se marca la jugada que se jugó realmente.
+    Hay dos formas de elegir la posición: escribir un **FEN** o recorrer una
+    **partida guardada** del Parquet del cuaderno 1. En la segunda vista
+    también se marca la jugada que se jugó realmente.
 
-        **Aviso:** las posiciones de las partidas guardadas pueden haber
-        participado en el entrenamiento. Sirven para inspección visual, no como
-        una medida independiente de exactitud.
-        """
-    )
+    **Aviso:** las posiciones de las partidas guardadas pueden haber
+    participado en el entrenamiento. Sirven para inspección visual, no como
+    una medida independiente de exactitud.
+    """)
     return
 
 
@@ -117,23 +115,35 @@ def _(
             kind="warn",
         )
     checkpoint_view
-    return checkpoints, checkpoint_table
+    return (checkpoints,)
 
 
 @app.cell
 def _(POSITIONS_PATH, mo, pl):
-    mo.stop(
-        not POSITIONS_PATH.exists(),
-        mo.callout(
+    if POSITIONS_PATH.exists():
+        positions_df = pl.read_parquet(POSITIONS_PATH)
+        _positions_view = mo.md(
+            f"{positions_df.height:,} posiciones cargadas desde "
+            f"`{POSITIONS_PATH.name}`."
+        )
+    else:
+        positions_df = pl.DataFrame(
+            schema={
+                "game_id": pl.String,
+                "fen": pl.String,
+                "move_uci": pl.String,
+                "move_ply": pl.Int16,
+                "avg_elo": pl.Float32,
+            }
+        )
+        _positions_view = mo.callout(
             mo.md(
                 "No existe "
                 f"`{POSITIONS_PATH}`. Ejecuta el cuaderno 1 para generar la "
                 "muestra de partidas; sin ese archivo solo se puede usar un FEN."
             ),
             kind="warn",
-        ),
-    )
-    positions_df = pl.read_parquet(POSITIONS_PATH)
+        )
     games_df = (
         positions_df.group_by("game_id")
         .agg(
@@ -144,13 +154,14 @@ def _(POSITIONS_PATH, mo, pl):
         )
         .sort("game_id")
     )
+    _tables = (
+        [mo.ui.table(games_df.head(20), pagination=False)] if games_df.height else []
+    )
     mo.vstack(
         [
             mo.md("## Partidas guardadas"),
-            mo.md(
-                f"{positions_df.height:,} posiciones de {games_df.height:,} partidas."
-            ),
-            mo.ui.table(games_df.head(20), pagination=False),
+            _positions_view,
+            *_tables,
         ]
     )
     return games_df, positions_df
@@ -217,22 +228,13 @@ def _(checkpoints, chess, games_df, mo):
             for row in games_df.iter_rows(named=True)
         }
         _default_game = next(iter(_game_options))
-        _max_ply = int(games_df["last_ply"].max())
     else:
         _game_options = {"Sin partidas guardadas": ""}
         _default_game = "Sin partidas guardadas"
-        _max_ply = 1
     game_choice = mo.ui.dropdown(
         options=_game_options,
         value=_default_game,
         label="Partida guardada",
-    )
-    ply_slider = mo.ui.slider(
-        start=1,
-        stop=max(1, _max_ply),
-        step=1,
-        value=1,
-        label="Posición dentro de la partida (ply)",
     )
 
     mo.vstack(
@@ -242,19 +244,41 @@ def _(checkpoints, chess, games_df, mo):
             mo.md("### FEN"),
             preset,
             fen_input,
-            mo.md("### Partida guardada"),
-            mo.hstack([game_choice, ply_slider], justify="start"),
         ]
     )
     return (
         fen_input,
         game_choice,
         model_choice,
-        ply_slider,
         preset,
         presets,
         source,
     )
+
+
+@app.cell
+def _(game_choice, games_df, mo, pl):
+    _selected_game = games_df.filter(pl.col("game_id") == game_choice.value)
+    if _selected_game.height:
+        _first_ply = int(_selected_game["first_ply"][0])
+        _last_ply = int(_selected_game["last_ply"][0])
+    else:
+        _first_ply = 1
+        _last_ply = 1
+    ply_slider = mo.ui.slider(
+        start=_first_ply,
+        stop=max(_first_ply, _last_ply),
+        step=1,
+        value=_first_ply,
+        label="Posición dentro de la partida (ply)",
+    )
+    mo.vstack(
+        [
+            mo.md("### Partida guardada"),
+            mo.hstack([game_choice, ply_slider], justify="start"),
+        ]
+    )
+    return (ply_slider,)
 
 
 @app.cell
@@ -345,7 +369,20 @@ def _(
             kind="warn",
         ),
     )
-    models = {label: load_cached(path) for label, path in checkpoints.items()}
+    models = {}
+    load_errors = []
+    for label, path in checkpoints.items():
+        try:
+            models[label] = load_cached(path)
+        except (RuntimeError, FileNotFoundError) as error:
+            load_errors.append(f"- **{label}**: {error}")
+    mo.stop(
+        not models,
+        mo.callout(
+            mo.md("Ningún checkpoint se pudo cargar:\n\n" + "\n".join(load_errors)),
+            kind="danger",
+        ),
+    )
     predictions = {
         label: predict_top_moves(model, fen, top_k=3) for label, model in models.items()
     }
@@ -395,6 +432,17 @@ def _(
         mo.md(f"**Posición:** `{fen}`"),
         mo.md(f"**Flecha azul:** mejor jugada de *{selected_label}*"),
     ]
+    if load_errors:
+        _details.insert(
+            0,
+            mo.callout(
+                mo.md(
+                    "Estos checkpoints no se pudieron cargar y se omiten:\n\n"
+                    + "\n".join(load_errors)
+                ),
+                kind="warn",
+            ),
+        )
     if source.value == "Partida guardada":
         _details.append(
             mo.md(

@@ -288,14 +288,31 @@ def box_iou(a: Sequence[float], b: Sequence[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _box_match_score(a: Sequence[float], b: Sequence[float], min_iou: float) -> float:
+    """Match score combining IoU with a center-proximity fallback for slender pieces."""
+    overlap = box_iou(a, b)
+    if overlap >= min_iou:
+        return overlap
+    # Slender pieces (bishops/pawns) can shift a few pixels with camera jitter
+    # and drop below min_iou even when clearly the same physical piece.
+    ax, ay = (a[0] + a[2]) / 2, (a[1] + a[3]) / 2
+    bx, by = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+    ref_size = max(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1], 1.0)
+    dist = float(np.hypot(ax - bx, ay - by)) / ref_size
+    if dist <= 0.35 and overlap > 0.0:
+        return max(overlap, min_iou * (1.0 - dist))
+    return 0.0
+
+
 class PieceLabelSmoother:
     """Stabilise the *type* of each piece across video frames.
 
     A single frame can call a knight a pawn when the view is blurred or partly
-    hidden.  Each physical piece is followed from frame to frame (greedy IoU
-    matching) and the label shown is the confidence-weighted vote of its recent
-    frames, so one bad frame cannot flip the label while a real change (a piece
-    replaced on the same square) still wins within a few frames.
+    hidden.  Each physical piece is followed from frame to frame (greedy IoU +
+    center-proximity matching) and the label shown is the confidence-weighted
+    vote of its recent frames, so one bad frame cannot flip the label while a
+    real change (a piece replaced on the same square) still wins within a few
+    frames.
 
     ``decay`` multiplies old votes every frame (0.8 means the last ~5 frames
     dominate).  Tracks unseen for ``max_missing`` frames are dropped.  Only the
@@ -313,14 +330,14 @@ class PieceLabelSmoother:
             track["missing"] += 1
             track["votes"] = {label: weight * self.decay for label, weight in track["votes"].items()}
         pairs = sorted(
-            ((box_iou(track["box"], detection.xyxy), t, d)
+            ((_box_match_score(track["box"], detection.xyxy, self.min_iou), t, d)
              for t, track in enumerate(self._tracks) for d, detection in enumerate(detections)),
             reverse=True,
         )
         assigned: dict[int, int] = {}
         used_tracks: set[int] = set()
-        for overlap, t, d in pairs:
-            if overlap < self.min_iou:
+        for score, t, d in pairs:
+            if score <= 0.0:
                 break
             if t in used_tracks or d in assigned:
                 continue

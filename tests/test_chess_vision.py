@@ -7,9 +7,11 @@ from lichess_pipeline.chess_vision import (
     PieceLabelSmoother,
     box_iou,
     board_destination,
+    crop_piece,
     detect_green_screen_board,
     detections_to_fen,
     extrapolate_board_corners,
+    fuse_piece_probabilities,
     marker_centers_by_corner,
     piece_description_from_label,
     piece_symbol_from_label,
@@ -141,3 +143,28 @@ def test_label_smoother_tracks_pieces_independently_and_forgets_old_tracks():
         smoother.update([])
     # The old king track expired, so a new piece starts fresh.
     assert smoother.update([_piece("queen", 0.4, left)])[0].label == "queen"
+
+
+def test_label_smoother_tolerates_small_camera_jitter_on_slender_piece():
+    smoother = PieceLabelSmoother(min_iou=0.4)
+    # Narrow bishop box shifts horizontally by 12px (IoU ~0.25 < 0.4, but same piece).
+    box_a = (100, 100, 120, 200)
+    box_b = (112, 100, 132, 200)
+    for _ in range(3):
+        smoother.update([_piece("bishop", 0.9, box_a)])
+    out = smoother.update([_piece("pawn", 0.5, box_b)])
+    assert out[0].label == "bishop"
+
+
+def test_fuse_piece_probabilities_combines_detector_and_classifier():
+    # Detector says queen (0.55), classifier strongly says king (0.90).
+    probs = [0.02, 0.90, 0.01, 0.01, 0.05, 0.01]  # bishop, king, knight, pawn, queen, rook
+    label, conf = fuse_piece_probabilities("queen", 0.55, probs, classifier_weight=1.25)
+    assert label == "king"
+    assert 0.5 < conf <= 1.0
+
+
+def test_crop_piece_returns_requested_square_size_even_near_borders():
+    image = np.full((100, 100, 3), 128, dtype=np.uint8)
+    crop = crop_piece(image, (-5, 0, 25, 40), size=160)
+    assert crop.shape == (160, 160, 3)

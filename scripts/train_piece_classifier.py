@@ -34,25 +34,38 @@ ALIGNED = ROOT / 'data/vision/mixed-chess-shapes-aligned'
 KAGGLE = ROOT / 'data/vision/kaggle-chess-pieces/ChessPiece'
 KAGGLE_FOLDERS = {'bishop': 'bishop_resized', 'knight': 'knight-resize', 'pawn': 'pawn_resized',
                   'queen': 'Queen-Resized', 'rook': 'Rook-resize'}
+# Balance classes: Kaggle lacks kings and boards have 8x more pawns than kings/queens.
+CLASS_COPY_MULTIPLIER = {
+    'king': 3.0,
+    'queen': 2.2,
+    'bishop': 1.1,
+    'knight': 1.1,
+    'rook': 1.1,
+    'pawn': 0.5,
+}
 DESTINATION = ROOT / 'data/vision/piece-crops'
 
 
 def jitter(box, rng, strength):
     x1, y1, x2, y2 = box
     w, h = x2 - x1, y2 - y1
-    dx, dy = rng.uniform(-strength, strength, 2) * (w, h)
-    s = 1 + rng.uniform(-strength, strength, 2)
+    dx = rng.uniform(-strength, strength) * w
+    # Keep top crown/cross inside the crop (crucial for king vs queen).
+    dy = rng.uniform(-strength * 0.75, strength * 0.75) * h
+    s = 1 + rng.uniform(-strength * 0.8, strength * 1.1, 2)
     cx, cy = (x1 + x2) / 2 + dx, (y1 + y2) / 2 + dy
     return cx - w * s[0] / 2, cy - h * s[1] / 2, cx + w * s[0] / 2, cy + h * s[1] / 2
 
 
-def build(size: int, copies: int, kaggle_copies: int) -> dict:
+def build(size: int, copies: int, kaggle_copies: int, grayscale_prob: float = 0.2) -> dict:
     if DESTINATION.exists():
         shutil.rmtree(DESTINATION)
     rng = np.random.default_rng(42)
     counts: dict[str, dict[str, int]] = {}
 
     def save(split, name, image, stem):
+        if split == 'train' and rng.random() < grayscale_prob:
+            image = cv2.cvtColor(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
         folder = DESTINATION / split / name
         folder.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(folder / f'{stem}.jpg'), image, [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -74,18 +87,21 @@ def build(size: int, copies: int, kaggle_copies: int) -> dict:
                     name = PIECE_CLASSES[int(c)]
                     stem = f'{domain}-{image_path.stem}-{index}'
                     if split == 'train':
-                        n = copies if domain == '3d' else max(1, copies // 3)
+                        mult = CLASS_COPY_MULTIPLIER[name]
+                        base = copies if domain == '3d' else max(1, copies // 3)
+                        n = max(1, round(base * mult))
                         for k in range(n):
-                            b = box if k == 0 else jitter(box, rng, 0.12)
+                            b = box if k == 0 else jitter(box, rng, 0.10)
                             save(split, name, crop_piece(image, b, size), f'{stem}-{k}')
                     else:
                         save('val' if split == 'valid' else split, name, crop_piece(image, box, size), stem)
     for name, folder in KAGGLE_FOLDERS.items():
+        k_copies = max(1, round(kaggle_copies * min(CLASS_COPY_MULTIPLIER[name], 1.5)))
         for path in sorted((KAGGLE / folder).glob('*.jpg')):
             image = cv2.imread(str(path))
             h, w = image.shape[:2]
-            for k in range(kaggle_copies):
-                b = (0, 0, w, h) if k == 0 else jitter((0, 0, w, h), rng, 0.1)
+            for k in range(k_copies):
+                b = (0, 0, w, h) if k == 0 else jitter((0, 0, w, h), rng, 0.08)
                 save('train', name, crop_piece(image, b, size, margin=1.1), f'kaggle-{path.stem}-{k}')
     (DESTINATION / 'counts.json').write_text(json.dumps(counts, indent=2))
     return counts
@@ -93,20 +109,21 @@ def build(size: int, copies: int, kaggle_copies: int) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--epochs', type=int, default=25)
-    parser.add_argument('--imgsz', type=int, default=128)
+    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--imgsz', type=int, default=160)
     parser.add_argument('--batch', type=int, default=64)
     parser.add_argument('--device', default='mps')
     parser.add_argument('--model', type=Path, default=ROOT / 'data/models/yolo11s-cls.pt')
-    parser.add_argument('--copies', type=int, default=3, help='Jittered crops per real 3D box')
-    parser.add_argument('--kaggle-copies', type=int, default=4)
-    parser.add_argument('--name', default='piece-classifier')
+    parser.add_argument('--copies', type=int, default=3, help='Base jittered crops per real 3D box')
+    parser.add_argument('--kaggle-copies', type=int, default=3)
+    parser.add_argument('--grayscale-prob', type=float, default=0.2, help='Probability of grayscale crop in train')
+    parser.add_argument('--name', default='piece-classifier-v2')
     parser.add_argument('--output', type=Path, default=ROOT / 'data/models/chess-piece-classifier.pt')
     parser.add_argument('--skip-build', action='store_true')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     counts = json.loads((DESTINATION / 'counts.json').read_text()) if args.skip_build else build(
-        args.imgsz, args.copies, args.kaggle_copies)
+        args.imgsz, args.copies, args.kaggle_copies, args.grayscale_prob)
     print(json.dumps(counts, indent=2), flush=True)
     from ultralytics import YOLO
 
@@ -120,7 +137,7 @@ def main() -> None:
             label_smoothing=0.05, plots=True)
     shutil.copy2(Path(result.save_dir) / 'weights/best.pt', args.output)
     model = YOLO(args.output)
-    report = {'counts': counts, 'weights': str(args.output.relative_to(ROOT))}
+    report = {'counts': counts, 'weights': str(args.output.resolve().relative_to(ROOT))}
     for split in ('val', 'test'):
         metrics = model.val(data=str(DESTINATION), split=split, imgsz=args.imgsz, batch=args.batch,
                             device=args.device, workers=0, project=str(ROOT / 'data/runs/vision'),

@@ -32,15 +32,24 @@ def iou(a, b):
     return inter / np.maximum(union, 1e-9)
 
 
-def classify(classifier, crops, device, imgsz):
+def classify(classifier, crops, device, imgsz, *, tta: bool = False):
     """Return an (n, 6) probability array ordered like PIECE_CLASSES."""
     if not crops:
         return np.zeros((0, len(PIECE_CLASSES)))
-    out = np.zeros((len(crops), len(PIECE_CLASSES)))
-    for i, result in enumerate(classifier.predict(crops, imgsz=imgsz, device=device, verbose=False)):
-        for class_id, name in result.names.items():
-            out[i, PIECE_CLASSES.index(name)] = float(result.probs.data[class_id])
-    return out
+
+    def _run(batch):
+        out = np.zeros((len(batch), len(PIECE_CLASSES)))
+        for i, result in enumerate(classifier.predict(batch, imgsz=imgsz, device=device, verbose=False)):
+            for class_id, name in result.names.items():
+                if name in PIECE_CLASSES:
+                    out[i, PIECE_CLASSES.index(name)] = float(result.probs.data[class_id])
+        return out
+
+    probs = _run(crops)
+    if tta:
+        flipped = [cv2.flip(crop, 1) for crop in crops]
+        probs = 0.5 * (probs + _run(flipped))
+    return probs
 
 
 def main() -> None:
@@ -48,17 +57,21 @@ def main() -> None:
     parser.add_argument('--detector', type=Path, default=ROOT / 'data/models/chess-piece-shapes.pt')
     parser.add_argument('--classifier', type=Path, default=ROOT / 'data/models/chess-piece-classifier.pt')
     parser.add_argument('--split', nargs='+', default=['valid'])
-    parser.add_argument('--conf', type=float, default=0.4)
+    parser.add_argument('--conf', type=float, default=0.30)
     parser.add_argument('--imgsz', type=int, default=640)
-    parser.add_argument('--crop-size', type=int, default=128)
+    parser.add_argument('--crop-size', type=int, default=None,
+                        help='Classifier crop size (auto-detected from checkpoint if omitted)')
+    parser.add_argument('--tta', action='store_true', help='Average classifier predictions with horizontal flip')
     parser.add_argument('--device', default='mps')
-    parser.add_argument('--weights-list', type=float, nargs='+', default=[0.0, 0.5, 1.0, 2.0, 5.0, 1000.0],
+    parser.add_argument('--weights-list', type=float, nargs='+', default=[0.0, 0.5, 1.0, 1.25, 1.5, 2.0, 1000.0],
                         help='Classifier weights to try (0 = detector only, 1000 = classifier only)')
     args = parser.parse_args()
     from ultralytics import YOLO
 
     detector, classifier = YOLO(args.detector), YOLO(args.classifier)
+    crop_size = args.crop_size or int(getattr(classifier, 'overrides', {}).get('imgsz', 128))
     tallies = {w: np.zeros((len(PIECE_CLASSES), len(PIECE_CLASSES) + 1), dtype=int) for w in args.weights_list}
+    false_boxes = 0
     for split in args.split:
         for path in sorted((DATASET / split / '3d/images').glob('*.jpg')):
             image = cv2.imread(str(path))
@@ -69,11 +82,12 @@ def main() -> None:
                 truth.append((int(c), np.array([(x - w / 2) * width, (y - h / 2) * height,
                                                 (x + w / 2) * width, (y + h / 2) * height])))
             found = detector.predict(image, conf=args.conf, imgsz=args.imgsz, device=args.device,
-                                     verbose=False, agnostic_nms=True)[0]
+                                     verbose=False, agnostic_nms=True, iou=0.5)[0]
             boxes = found.boxes.xyxy.cpu().numpy() if len(found.boxes) else np.zeros((0, 4))
             det_names = [found.names[int(c)] for c in found.boxes.cls.cpu().numpy()] if len(found.boxes) else []
             confs = found.boxes.conf.cpu().numpy() if len(found.boxes) else np.zeros(0)
-            probs = classify(classifier, [crop_piece(image, b, args.crop_size) for b in boxes], args.device, args.crop_size)
+            probs = classify(classifier, [crop_piece(image, b, crop_size) for b in boxes],
+                             args.device, crop_size, tta=args.tta)
             for weight in args.weights_list:
                 labels = [fuse_piece_probabilities(n, float(c), p, weight)[0] for n, c, p in zip(det_names, confs, probs)]
                 used: set[int] = set()
@@ -90,11 +104,15 @@ def main() -> None:
                         continue
                     used.add(best)
                     tallies[weight][gt_class, PIECE_CLASSES.index(labels[best])] += 1
+                if weight == args.weights_list[0]:
+                    false_boxes += len(boxes) - len(used)
+    print(f'conf={args.conf:.2f} imgsz={args.imgsz} crop_size={crop_size} tta={args.tta} false_boxes={false_boxes}', flush=True)
     for weight, matrix in tallies.items():
         detected = matrix[:, :-1]
         correct, confused, missed, total = int(np.trace(detected)), int(detected.sum() - np.trace(detected)), int(matrix[:, -1].sum()), int(matrix.sum())
         print(f'classifier_weight={weight:>6}: pieces={total} correct={correct} confused={confused} missed={missed} '
-              f'acc|det={correct / max(correct + confused, 1):.1%} e2e={correct / total:.1%}', flush=True)
+              f'acc|det={correct / max(correct + confused, 1):.2%} recall={(correct + confused) / max(total, 1):.2%} '
+              f'e2e={correct / total:.2%}', flush=True)
     last = tallies[args.weights_list[-1]]
     print('rows=truth; cols=' + ','.join(PIECE_CLASSES) + ',missed (last weight)')
     for i, name in enumerate(PIECE_CLASSES):

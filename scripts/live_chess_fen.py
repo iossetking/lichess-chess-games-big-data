@@ -53,9 +53,14 @@ def parse_args() -> argparse.Namespace:
         default=Path("data/models/chess-piece-classifier.pt"),
         help="Optional secondary piece crop classifier (YOLO-cls) for refined recognition",
     )
+    parser.add_argument("--no-classifier", action="store_true", help="Disable the stage-2 crop classifier")
+    parser.add_argument("--classifier-weight", type=float, default=1.25,
+                        help="Weight of the stage-2 classifier when fusing with the detector")
+    parser.add_argument("--classifier-tta", action="store_true",
+                        help="Enable horizontal-flip TTA on ambiguous classifier crops")
     parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0)")
     parser.add_argument("--size", type=int, default=DEFAULT_BOARD_SIZE, help="Rectified board side in pixels")
-    parser.add_argument("--confidence", type=float, default=0.40, help="Minimum YOLO confidence")
+    parser.add_argument("--confidence", type=float, default=0.30, help="Minimum YOLO confidence")
     parser.add_argument(
         "--require-segmentation",
         action="store_true",
@@ -87,13 +92,28 @@ def parse_args() -> argparse.Namespace:
 class YoloPieceDetector:
     """Small adapter that avoids tying core vision code to Ultralytics types."""
 
-    def __init__(self, weights: Path, classifier_weights: Path | None = None, device: str | None = None) -> None:
+    def __init__(
+        self,
+        weights: Path,
+        classifier_weights: Path | None = None,
+        device: str | None = None,
+        *,
+        classifier_weight: float = 1.25,
+        classifier_tta: bool = False,
+    ) -> None:
         try:
             from ultralytics import YOLO
         except ImportError as error:
             raise RuntimeError("Falta Ultralytics. Ejecuta: uv add ultralytics") from error
         self.model = YOLO(weights)
         self.classifier = YOLO(classifier_weights) if classifier_weights and classifier_weights.is_file() else None
+        self.classifier_imgsz = (
+            int(getattr(self.classifier, "overrides", {}).get("imgsz", 128))
+            if self.classifier is not None
+            else 128
+        )
+        self.classifier_weight = classifier_weight
+        self.classifier_tta = classifier_tta
         self.device = device
         self.is_segmentation = self.model.task == "segment"
 
@@ -103,9 +123,21 @@ class YoloPieceDetector:
         for _ in range(2):
             self.model.predict(blank, imgsz=imgsz, device=self.device, verbose=False)
         if self.classifier is not None:
-            crop_blank = [np.zeros((128, 128, 3), dtype=np.uint8)]
+            crop_blank = [np.zeros((self.classifier_imgsz, self.classifier_imgsz, 3), dtype=np.uint8)]
             for _ in range(2):
-                self.classifier.predict(crop_blank, imgsz=128, device=self.device, verbose=False)
+                self.classifier.predict(crop_blank, imgsz=self.classifier_imgsz, device=self.device, verbose=False)
+
+    def _classify_crops(self, crops: list[np.ndarray]) -> list[list[float]]:
+        assert self.classifier is not None
+        cls_results = self.classifier.predict(crops, imgsz=self.classifier_imgsz, device=self.device, verbose=False)
+        all_probs: list[list[float]] = []
+        for c_res in cls_results:
+            probs = [0.0] * len(PIECE_CLASSES)
+            for cid, cname in c_res.names.items():
+                if cname in PIECE_CLASSES:
+                    probs[PIECE_CLASSES.index(cname)] = float(c_res.probs.data[cid])
+            all_probs.append(probs)
+        return all_probs
 
     def detect(self, image: np.ndarray, confidence: float, imgsz: int) -> list[PieceDetection]:
         # agnostic NMS keeps one box per physical piece, so the same piece can
@@ -120,21 +152,30 @@ class YoloPieceDetector:
         det_labels = [names[int(box.cls.item())] for box in result.boxes]
         det_confs = [float(box.conf.item()) for box in result.boxes]
 
-        # Stage 2 crop classifier fusion if available
-        if self.classifier is not None and boxes_xyxy:
-            crops = [crop_piece(image, b, 128) for b in boxes_xyxy]
-            cls_results = self.classifier.predict(crops, imgsz=128, device=self.device, verbose=False)
-            refined_labels = []
-            refined_confs = []
-            for d_label, d_conf, c_res in zip(det_labels, det_confs, cls_results):
-                probs = [0.0] * len(PIECE_CLASSES)
-                for cid, cname in c_res.names.items():
-                    if cname in PIECE_CLASSES:
-                        probs[PIECE_CLASSES.index(cname)] = float(c_res.probs.data[cid])
-                f_label, f_conf = fuse_piece_probabilities(d_label, d_conf, probs, classifier_weight=1.5)
-                refined_labels.append(f_label)
-                refined_confs.append(f_conf)
-            det_labels, det_confs = refined_labels, refined_confs
+        # Stage 2 crop classifier fusion (only for six-shape labels so 12-class colour labels keep their side).
+        shape_indices = [i for i, lbl in enumerate(det_labels) if lbl in PIECE_CLASSES]
+        if self.classifier is not None and shape_indices:
+            crops = [crop_piece(image, boxes_xyxy[i], self.classifier_imgsz) for i in shape_indices]
+            all_probs = self._classify_crops(crops)
+
+            # Smart horizontal-flip TTA: only re-check ambiguous or disagreeing crops (~1-3 per frame).
+            if self.classifier_tta:
+                ambiguous = [
+                    k for k, (idx, probs) in enumerate(zip(shape_indices, all_probs))
+                    if max(probs) < 0.90 or PIECE_CLASSES[int(np.argmax(probs))] != det_labels[idx]
+                ]
+                if ambiguous:
+                    flipped_crops = [cv2.flip(crops[k], 1) for k in ambiguous]
+                    flipped_probs = self._classify_crops(flipped_crops)
+                    for k, fprobs in zip(ambiguous, flipped_probs):
+                        all_probs[k] = [0.5 * (a + b) for a, b in zip(all_probs[k], fprobs)]
+
+            for idx, probs in zip(shape_indices, all_probs):
+                f_label, f_conf = fuse_piece_probabilities(
+                    det_labels[idx], det_confs[idx], probs, classifier_weight=self.classifier_weight
+                )
+                det_labels[idx] = f_label
+                det_confs[idx] = f_conf
 
         detections: list[PieceDetection] = []
         for index in range(len(boxes_xyxy)):
@@ -421,7 +462,14 @@ def main() -> int:
         return 2
 
     try:
-        pieces = YoloPieceDetector(args.weights, args.classifier, args.device)
+        classifier_path = None if args.no_classifier else args.classifier
+        pieces = YoloPieceDetector(
+            args.weights,
+            classifier_path,
+            args.device,
+            classifier_weight=args.classifier_weight,
+            classifier_tta=args.classifier_tta,
+        )
         pieces.warmup(args.imgsz)
         if args.require_segmentation and not pieces.is_segmentation:
             raise RuntimeError("--require-segmentation needs YOLO-seg weights, not a detection checkpoint")

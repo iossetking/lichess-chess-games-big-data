@@ -13,20 +13,21 @@ La unión de ambos es: foto del tablero → FEN → jugada sugerida.
 
 ```bash
 uv sync
+git lfs pull   # descarga los checkpoints versionados en data/models/
 ```
 
-Los checkpoints de `data/models/` se guardan a media precisión (`float16`) para
-ocupar la mitad y se versionan con Git LFS. Tras clonar, ejecuta `git lfs pull`
-para descargarlos. Los pesos de visión de YOLO (`chess-pieces*.pt`,
-`chess-piece-classifier.pt`) no vienen con el repositorio: genéralos con los
-entrenadores de `scripts/` o pídeselos a quien los haya entrenado.
+Los checkpoints se guardan a media precisión (`float16`) para ocupar la mitad y
+se versionan con Git LFS (ver `.gitattributes`); `git lfs pull` los descarga
+tras clonar. Los pesos de visión de YOLO (`chess-pieces*.pt`,
+`chess-piece-classifier.pt`) pueden venir en el repositorio, y si faltan se
+generan con los entrenadores de `scripts/` (ver la sección de visión).
 
 ## Cuadernos de datos y predicción (entrega parcial)
 
 Todo se lee directamente de `database.lichess.org`; no se necesita descargar un
 mes completo. Cada cuaderno cierra el flujo HTTP en cuanto reúne la muestra
-pedida y guarda sus resultados en `data/processed/` y `data/models/` (ignorados
-por git).
+pedida y guarda sus resultados en `data/processed/` (ignorado por git) y
+`data/models/` (versionado con Git LFS).
 
 | Cuaderno | Contenido | Salidas |
 |---|---|---|
@@ -49,6 +50,25 @@ del cuaderno 1 todavía no existen. El cuaderno 4 detecta cualquier archivo
 `.pt` o `.pth` que guardes bajo `data/models/`, incluidas subcarpetas, y permite
 elegir cuáles comparar; las posiciones de partidas guardadas solo sirven para
 inspección visual, no como una medida independiente de exactitud.
+
+### Guardado de los modelos
+
+Los cuadernos guardan cada checkpoint con `save_policy_checkpoint`, que escribe
+el `state_dict` a media precisión (`float16`): el mismo modelo ocupa la mitad
+(unos 64 MB en lugar de 129 MB) y las predicciones apenas cambian, porque al
+cargar los tensores vuelven a `float32`.
+
+- `data/models/` se versiona con **Git LFS**; `git lfs pull` descarga los pesos
+  y un `.pt` sin descargar se detecta con un mensaje claro en vez de un error de
+  deserialización.
+- La validación cruzada ya no escribe los pesos de cada partición en
+  `data/models/cv/`: se conservan en memoria mientras dura el cuaderno, así que
+  no deja cientos de megabytes de checkpoints temporales.
+- `scripts/compact_checkpoints.py` convierte checkpoints antiguos a media
+  precisión; `--dry-run` solo informa del ahorro.
+- `load_policy_checkpoint` lee el número de canales de las convoluciones del
+  archivo, así que los modelos entrenados con otra arquitectura siguen cargando
+  en el cuaderno 4 y en `live_chess_fen.py`.
 
 ### Enfoque 3: Maia-3 + LoRA
 
@@ -113,26 +133,39 @@ internas del patrón 8×8 y calcula la homografía. Después un checkpoint YOLO
 entrenado para piezas se ejecuta sobre el tablero rectificado; cada centro de
 caja se asigna a una casilla y se construye el FEN.
 
-Instala la dependencia de inferencia y coloca unos pesos de YOLO con las 12
-clases coloreadas en `data/models/`:
+### 1 · Consigue los pesos de piezas
+
+El lector necesita un checkpoint YOLO con las 12 clases coloreadas. El
+repositorio versiona los pesos de visión en `data/models/` con Git LFS:
 
 ```bash
-uv add ultralytics
+git lfs pull
+```
+
+Si no están disponibles, entrena el detector público. El comando descarga el
+espejo combinado [dopaul/chess-pieces-merged](https://huggingface.co/datasets/dopaul/chess-pieces-merged),
+CC BY 4.0, exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
+mejor checkpoint a `data/models/chess-pieces.pt`:
+
+```bash
+uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
+```
+
+Para uso confiable, añade al ajuste fotos de tu cámara, piezas e iluminación.
+
+### 2 · Ejecuta la vista en vivo
+
+`ultralytics` ya está en `pyproject.toml`, así que `uv sync` lo instala. Con los
+pesos en su sitio:
+
+```bash
 uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt
 ```
 
 Los nombres de clase aceptados incluyen `w-pawn`/`b-king`,
 `white_pawn`/`black_king` y variantes equivalentes. Un checkpoint COCO normal
 (`yolo*.pt`) **no sirve**, porque no conoce piezas de ajedrez. Un punto de
-partida público es el modelo/dataset [Chess Piece Detect de Roboflow Universe](https://universe.roboflow.com/chess-ynmuj/chess-piece-detect). El proyecto incluye un entrenador que descarga el espejo combinado [dopaul/chess-pieces-merged](https://huggingface.co/datasets/dopaul/chess-pieces-merged), CC BY 4.0, y guarda los pesos listos para usar:
-
-```bash
-uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
-```
-
-El comando exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
-mejor checkpoint a `data/models/chess-pieces.pt`. Para uso confiable, añade al
-ajuste fotos de tu cámara, piezas e iluminación.
+partida público es el modelo/dataset [Chess Piece Detect de Roboflow Universe](https://universe.roboflow.com/chess-ynmuj/chess-piece-detect).
 
 La vista en vivo dibuja cada detección con su tipo y color: cajas azul claro
 para blancas y rojo para negras, por ejemplo `peón negro 0.91`. El modelo que
@@ -140,8 +173,8 @@ se entrenó aquí es de **detección** y por eso usa cajas. Si se proporcionan
 pesos **YOLO-seg** de piezas, el mismo comando superpone además la máscara de
 píxeles de cada peón, torre, caballo, etc.:
 
-Ya hay unos pesos YOLO-seg validados en `data/models/chess-pieces-seg.pt`.
-Úsalos así:
+Ya hay unos pesos YOLO-seg validados en `data/models/chess-pieces-seg.pt`
+(descárgalos con `git lfs pull`). Úsalos así:
 
 ```bash
 uv run python scripts/live_chess_fen.py \
@@ -159,8 +192,9 @@ piezas reales, especialmente con manos y oclusiones.
 
 Si la cámara mira una imagen de tablero en el celular, los pesos de tablero
 físico no generalizan a sus sprites 2D. Para el diseño de piezas gris/blanco
-incluido como plantilla se entrenó un YOLO-seg específico y ya está disponible
-en `data/models/screen-chess-pieces-seg.pt`:
+incluido como plantilla se entrenó un YOLO-seg específico, disponible en
+`data/models/screen-chess-pieces-seg.pt` (si el archivo falta, recupera los
+pesos con `git lfs pull`):
 
 ```bash
 uv run python scripts/live_chess_fen.py \

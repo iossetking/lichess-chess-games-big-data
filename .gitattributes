@@ -1,0 +1,5 @@
+# Model weights are stored with Git LFS so the repository stays small.
+data/models/**/*.pt filter=lfs diff=lfs merge=lfs -text
+data/models/**/*.pth filter=lfs diff=lfs merge=lfs -text
+data/models/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
+data/models/**/*.onnx filter=lfs diff=lfs merge=lfs -text

@@ -33,7 +33,11 @@ __marimo__/
 .marimo/
 
 # Local datasets and downloaded cache
-/data/
+/data/*
+# Trained checkpoints are tracked (via Git LFS, see .gitattributes); the
+# bundled Hugging Face cache is re-downloadable and stays out of Git.
+!/data/models/
+/data/models/maia3/
 
 # Local environment variables and secrets
 .env

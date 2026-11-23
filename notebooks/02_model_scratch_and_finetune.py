@@ -16,6 +16,11 @@ def _():
     import polars as pl
     import torch
 
+    from lichess_pipeline.model.checkpoints import (
+        compact_state_dict,
+        load_policy_checkpoint,
+        save_policy_checkpoint,
+    )
     from lichess_pipeline.model.scratch_lora import (
         apply_head_lora,
         count_trainable_parameters,
@@ -72,11 +77,13 @@ def _():
         POSITIONS_PATH,
         apply_head_lora,
         chess,
+        compact_state_dict,
         copy,
         count_trainable_parameters,
         evaluate_model,
         kfold,
         load_evals,
+        load_policy_checkpoint,
         load_positions,
         make_tensor_dataset,
         merge_head_lora,
@@ -84,6 +91,7 @@ def _():
         pl,
         plt,
         predict_top_moves,
+        save_policy_checkpoint,
         split_holdout,
         torch,
         train_head_lora,
@@ -319,7 +327,8 @@ def _(mo):
 
     Cada modelo tiene su propia celda. El modelo **desde cero** siempre se
     entrena en cada partición, porque es la base que necesitan los dos ajustes
-    finos; los pesos de cada partición quedan en `data/models/cv/`. Los dos
+    finos; los pesos de cada partición se conservan en memoria (a media
+    precisión) y no se escriben en disco. Los dos
     ajustes finos se pueden desactivar por separado con las casillas de los
     parámetros: así se entrena y valida solo lo que interesa.
     """)
@@ -395,7 +404,7 @@ def _(eval_dev_df, human_dev_df, kfold, make_tensor_dataset, mo, n_folds, pl):
 @app.cell
 def _(
     ChessPolicyNet,
-    MODELS_DIR,
+    compact_state_dict,
     cv_row,
     epochs_stage1,
     eval_cv_folds,
@@ -406,14 +415,11 @@ def _(
     mo,
     pl,
     plt,
-    torch,
     train_model,
 ):
-    _cache_dir = MODELS_DIR / "cv"
-    _cache_dir.mkdir(parents=True, exist_ok=True)
     _rows = []
     _histories = []
-    scratch_fold_paths = []
+    scratch_fold_states = []
     for _fold, ((_h_train, _h_val), (_e_train, _e_val)) in enumerate(
         zip(human_cv_folds, eval_cv_folds, strict=True), start=1
     ):
@@ -429,9 +435,9 @@ def _(
             batch_size=128,
         )
         _histories.append(pl.DataFrame(_history))
-        _fold_path = _cache_dir / f"scratch_fold{_fold}.pt"
-        torch.save(_model.state_dict(), _fold_path)
-        scratch_fold_paths.append(_fold_path)
+        # Kept in memory (half precision, like the saved checkpoints) so the
+        # fine-tuning cells can reuse them without writing data/models/cv/.
+        scratch_fold_states.append(compact_state_dict(_model.state_dict()))
         _rows.append(
             cv_row(
                 _fold,
@@ -505,7 +511,8 @@ def _(
                     f"(± {100 * _human_rows['Top-1'].std():.2f}) y Top-3 "
                     f"**{100 * _human_rows['Top-3'].mean():.2f} %** "
                     f"(± {100 * _human_rows['Top-3'].std():.2f}). Los pesos de cada "
-                    "partición se guardan en `data/models/cv/` para los ajustes finos."
+                    "partición se conservan en memoria (a media precisión) para "
+                    "los ajustes finos."
                 ),
                 kind="info",
             ),
@@ -513,7 +520,7 @@ def _(
             _figure,
         ]
     )
-    return (scratch_fold_paths,)
+    return (scratch_fold_states,)
 
 
 @app.cell
@@ -529,8 +536,7 @@ def _(
     mo,
     pl,
     plt,
-    scratch_fold_paths,
-    torch,
+    scratch_fold_states,
     train_model,
 ):
     mo.stop(
@@ -545,14 +551,12 @@ def _(
     )
     _rows = []
     _histories = []
-    for _fold, ((_e_train, _e_val), _fold_path) in enumerate(
-        zip(eval_cv_folds, scratch_fold_paths, strict=True), start=1
+    for _fold, ((_e_train, _e_val), _fold_state) in enumerate(
+        zip(eval_cv_folds, scratch_fold_states, strict=True), start=1
     ):
         _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
         _model = ChessPolicyNet()
-        _model.load_state_dict(
-            torch.load(_fold_path, map_location="cpu", weights_only=True)
-        )
+        _model.load_state_dict(_fold_state)
         _history = train_model(
             _model,
             make_tensor_dataset(_e_train, "fen", "best_move"),
@@ -651,8 +655,7 @@ def _(
     mo,
     pl,
     plt,
-    scratch_fold_paths,
-    torch,
+    scratch_fold_states,
     train_head_lora,
 ):
     mo.stop(
@@ -668,14 +671,12 @@ def _(
     _rank = int(lora_rank.value)
     _rows = []
     _histories = []
-    for _fold, ((_e_train, _e_val), _fold_path) in enumerate(
-        zip(eval_cv_folds, scratch_fold_paths, strict=True), start=1
+    for _fold, ((_e_train, _e_val), _fold_state) in enumerate(
+        zip(eval_cv_folds, scratch_fold_states, strict=True), start=1
     ):
         _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
         _base = ChessPolicyNet()
-        _base.load_state_dict(
-            torch.load(_fold_path, map_location="cpu", weights_only=True)
-        )
+        _base.load_state_dict(_fold_state)
         _model = apply_head_lora(
             copy.deepcopy(_base), rank=_rank, alpha=2.0 * _rank
         )
@@ -992,18 +993,28 @@ def _(
 
 
 @app.cell
-def _(MODELS_DIR, lora_ft_model, mo, scratch_model, torch, weight_ft_model):
+def _(
+    MODELS_DIR,
+    lora_ft_model,
+    mo,
+    save_policy_checkpoint,
+    scratch_model,
+    weight_ft_model,
+):
     scratch_path = MODELS_DIR / "approach1_scratch.pt"
     weight_path = MODELS_DIR / "approach1_weight_ftuning.pt"
     lora_path = MODELS_DIR / "approach1_lora_ftuning.pt"
-    torch.save(scratch_model.state_dict(), scratch_path)
-    torch.save(weight_ft_model.state_dict(), weight_path)
+    # Media precisión: el mismo modelo ocupa la mitad y sigue cargando igual.
+    save_policy_checkpoint(scratch_model, scratch_path)
+    save_policy_checkpoint(weight_ft_model, weight_path)
     # El adaptador LoRA se fusiona en la cabeza, así que este archivo es un
     # ChessPolicyNet normal y se carga sin reconstruir el adaptador.
-    torch.save(lora_ft_model.state_dict(), lora_path)
+    save_policy_checkpoint(lora_ft_model, lora_path)
+    _megabytes = scratch_path.stat().st_size / 1024**2
     mo.callout(
         mo.md(
-            "Pesos guardados:\n\n"
+            "Pesos guardados (media precisión, "
+            f"{_megabytes:.1f} MB cada uno):\n\n"
             f"- `{scratch_path}` (desde cero)\n"
             f"- `{weight_path}` (ajuste de pesos)\n"
             f"- `{lora_path}` (ajuste LoRA, ya fusionado)"
@@ -1014,7 +1025,13 @@ def _(MODELS_DIR, lora_ft_model, mo, scratch_model, torch, weight_ft_model):
 
 
 @app.cell
-def _(ChessPolicyNet, lora_path, mo, scratch_path, torch, weight_path):
+def _(
+    load_policy_checkpoint,
+    lora_path,
+    mo,
+    scratch_path,
+    weight_path,
+):
     mo.stop(
         not (
             scratch_path.exists()
@@ -1030,16 +1047,9 @@ def _(ChessPolicyNet, lora_path, mo, scratch_path, torch, weight_path):
         ),
     )
 
-    def _load(path):
-        model = ChessPolicyNet()
-        model.load_state_dict(
-            torch.load(path, map_location="cpu", weights_only=True)
-        )
-        return model.eval()
-
-    scratch_eval_model = _load(scratch_path)
-    weight_eval_model = _load(weight_path)
-    lora_eval_model = _load(lora_path)
+    scratch_eval_model = load_policy_checkpoint(scratch_path)
+    weight_eval_model = load_policy_checkpoint(weight_path)
+    lora_eval_model = load_policy_checkpoint(lora_path)
     mo.md(f"Pesos cargados desde `{scratch_path.parent}`.")
     return lora_eval_model, scratch_eval_model, weight_eval_model
 

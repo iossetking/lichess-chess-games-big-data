@@ -3,10 +3,15 @@ import pytest
 import torch
 
 from lichess_pipeline.model.checkpoints import (
+    compact_state_dict,
     discover_policy_checkpoints,
+    infer_channels,
     load_policy_checkpoint,
+    save_policy_checkpoint,
 )
 from lichess_pipeline.model.scratch_net import ChessPolicyNet, predict_top_moves
+
+TINY_CHANNELS = (8, 8)
 
 
 def test_discover_labels_nested_checkpoints_by_folder_and_filename(tmp_path):
@@ -84,4 +89,64 @@ def test_load_incompatible_state_dict_names_the_file(tmp_path):
     torch.save({"unexpected": torch.zeros(3)}, path)
 
     with pytest.raises(RuntimeError, match="approach1_weight_ftuning.pt"):
+        load_policy_checkpoint(path)
+
+
+def test_compact_state_dict_halves_floats_and_keeps_integer_buffers():
+    state = {"weight": torch.ones(2), "steps": torch.tensor(5)}
+
+    compact = compact_state_dict(state)
+
+    assert compact["weight"].dtype == torch.float16
+    assert compact["steps"].dtype == torch.int64
+    assert state["weight"].dtype == torch.float32
+
+
+def test_save_policy_checkpoint_is_smaller_than_float32_and_still_loads(tmp_path):
+    model = ChessPolicyNet(channels=TINY_CHANNELS)
+    half_path = save_policy_checkpoint(model, tmp_path / "nested" / "scratch.pt")
+    float_path = tmp_path / "scratch-fp32.pt"
+    torch.save(model.state_dict(), float_path)
+
+    state = torch.load(half_path, map_location="cpu", weights_only=True)
+
+    assert half_path.is_file()
+    assert state["head.weight"].dtype == torch.float16
+    assert half_path.stat().st_size < float_path.stat().st_size * 0.55
+    assert load_policy_checkpoint(half_path).training is False
+
+
+def test_saved_checkpoint_keeps_predictions_close(tmp_path):
+    torch.manual_seed(0)
+    model = ChessPolicyNet(channels=TINY_CHANNELS).eval()
+    loaded = load_policy_checkpoint(
+        save_policy_checkpoint(model, tmp_path / "scratch.pt")
+    )
+    features = torch.rand(3, 13, 8, 8)
+
+    with torch.no_grad():
+        assert torch.allclose(model(features), loaded(features), atol=1e-2)
+
+
+def test_load_rebuilds_the_trained_channel_width(tmp_path):
+    model = ChessPolicyNet(channels=(8, 12))
+    path = save_policy_checkpoint(model, tmp_path / "tiny.pt")
+    state = torch.load(path, map_location="cpu", weights_only=True)
+
+    loaded = load_policy_checkpoint(path)
+
+    assert infer_channels(state) == (8, 12)
+    assert loaded.head.in_features == 12 * 8 * 8
+    assert predict_top_moves(loaded, chess.STARTING_FEN, top_k=1)
+
+
+def test_load_reports_an_unpulled_git_lfs_pointer(tmp_path):
+    path = tmp_path / "approach1_scratch.pt"
+    path.write_bytes(
+        b"version https://git-lfs.github.com/spec/v1\n"
+        b"oid sha256:0000000000000000000000000000000000000000000000000000000000000000\n"
+        b"size 123\n"
+    )
+
+    with pytest.raises(RuntimeError, match="git lfs pull"):
         load_policy_checkpoint(path)

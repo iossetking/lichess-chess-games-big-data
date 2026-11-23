@@ -15,6 +15,12 @@ La unión de ambos es: foto del tablero → FEN → jugada sugerida.
 uv sync
 ```
 
+Los checkpoints de `data/models/` se guardan a media precisión (`float16`) para
+ocupar la mitad y se versionan con Git LFS. Tras clonar, ejecuta `git lfs pull`
+para descargarlos. Los pesos de visión de YOLO (`chess-pieces*.pt`,
+`chess-piece-classifier.pt`) no vienen con el repositorio: genéralos con los
+entrenadores de `scripts/` o pídeselos a quien los haya entrenado.
+
 ## Cuadernos de datos y predicción (entrega parcial)
 
 Todo se lee directamente de `database.lichess.org`; no se necesita descargar un

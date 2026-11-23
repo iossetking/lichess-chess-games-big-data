@@ -434,14 +434,14 @@ def draw_detections(image: np.ndarray, detections: list[PieceDetection]) -> None
 
 
 def load_policy(path: Path, architecture: str) -> Any:
+    if architecture == "scratch":
+        from lichess_pipeline.model.checkpoints import load_policy_checkpoint
+
+        return load_policy_checkpoint(path)
     import torch
 
-    if architecture == "scratch":
-        from lichess_pipeline.model.scratch_net import ChessPolicyNet
-        model = ChessPolicyNet()
-    else:
-        from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
-        model = MaiaResidualPolicyNet()
+    from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
+    model = MaiaResidualPolicyNet()
     model.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
     return model
 

@@ -334,9 +334,9 @@ def _(
         label="Elo mínimo (se exige a ambos jugadores)",
     )
     max_positions = mo.ui.number(
-        value=_clamp(_env_int("LICHESS_MAX_POSITIONS", 40000), 1000, 500000),
+        value=_clamp(_env_int("LICHESS_MAX_POSITIONS", 40000), 1000, 5_000_000),
         start=1000,
-        stop=500000,
+        stop=5_000_000,
         step=1000,
         label="Máximo de posiciones (FEN) a extraer",
     )
@@ -781,9 +781,9 @@ def _(mo):
         return max(low, min(high, value))
 
     max_evals = mo.ui.number(
-        value=_clamp(_env_int("LICHESS_MAX_EVALS", 20000), 1000, 500000),
+        value=_clamp(_env_int("LICHESS_MAX_EVALS", 20000), 1000, 5_000_000),
         start=1000,
-        stop=500000,
+        stop=5_000_000,
         step=1000,
         label="Evaluaciones únicas a leer",
     )

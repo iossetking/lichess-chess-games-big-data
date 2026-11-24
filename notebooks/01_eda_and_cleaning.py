@@ -214,12 +214,35 @@ def _(
     set_year_selection,
     year_selection,
 ):
+    import os as _os
+
+    def _env_int(name: str, fallback: int) -> int:
+        try:
+            return int(_os.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
+    def _clamp(value: int, low: int, high: int) -> int:
+        return max(low, min(high, value))
+
     years = sorted({year for year, _month in available_months})
     default_year, default_month = available_months[-1]
     current_years = tuple(year_selection())
+    if current_years == (0, 0):
+        current_years = (
+            _clamp(_env_int("LICHESS_YEAR_FROM", default_year), years[0], years[-1]),
+            _clamp(_env_int("LICHESS_YEAR_TO", default_year), years[0], years[-1]),
+        )
+        current_years = (min(current_years), max(current_years))
     if not (years[0] <= current_years[0] <= current_years[1] <= years[-1]):
         current_years = (default_year, default_year)
     current_months = tuple(month_selection())
+    if current_months == (0, 0):
+        current_months = (
+            _clamp(_env_int("LICHESS_MONTH_FROM", default_month), 1, 12),
+            _clamp(_env_int("LICHESS_MONTH_TO", default_month), 1, 12),
+        )
+        current_months = (min(current_months), max(current_months))
     if not (1 <= current_months[0] <= current_months[1] <= 12):
         current_months = (default_month, default_month)
     month_labels = {
@@ -276,7 +299,7 @@ def _(
         ),
     )
     max_games = mo.ui.number(
-        value=3000,
+        value=_clamp(_env_int("LICHESS_MAX_GAMES", 3000), 200, 50000),
         start=200,
         stop=50000,
         step=200,
@@ -286,11 +309,11 @@ def _(
         start=1500,
         stop=2200,
         step=100,
-        value=1800,
+        value=_clamp(_env_int("LICHESS_MIN_ELO", 1800), 1500, 2200),
         label="Elo mínimo (se exige a ambos jugadores)",
     )
     max_positions = mo.ui.number(
-        value=40000,
+        value=_clamp(_env_int("LICHESS_MAX_POSITIONS", 40000), 1000, 500000),
         start=1000,
         stop=500000,
         step=1000,
@@ -421,7 +444,7 @@ def _(
     pl,
 ):
     mo.stop(
-        not games_button.value,
+        mo.running_in_notebook() and not games_button.value,
         mo.md("Pulsa **Leer partidas oficiales** para cargar la muestra."),
     )
     mo.stop(
@@ -725,15 +748,30 @@ def _(extract_positions_df, games_clean, max_positions, mo, save_frame):
 
 @app.cell
 def _(mo):
+    import os as _os_evals
+
+    def _env_int(name: str, fallback: int) -> int:
+        try:
+            return int(_os_evals.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
+    def _clamp(value: int, low: int, high: int) -> int:
+        return max(low, min(high, value))
+
     max_evals = mo.ui.number(
-        value=20000,
+        value=_clamp(_env_int("LICHESS_MAX_EVALS", 20000), 1000, 500000),
         start=1000,
         stop=500000,
         step=1000,
         label="Evaluaciones únicas a leer",
     )
     min_depth = mo.ui.slider(
-        start=20, stop=40, step=5, value=20, label="Profundidad mínima de Stockfish"
+        start=20,
+        stop=40,
+        step=5,
+        value=_clamp(_env_int("LICHESS_MIN_DEPTH", 20), 20, 40),
+        label="Profundidad mínima de Stockfish",
     )
     evals_button = mo.ui.run_button(label="Leer evaluaciones oficiales (.jsonl.zst)")
     mo.vstack(
@@ -755,7 +793,7 @@ def _(mo):
 @app.cell
 def _(evals_button, evals_url, load_clean_evals_df, max_evals, min_depth, mo):
     mo.stop(
-        not evals_button.value,
+        mo.running_in_notebook() and not evals_button.value,
         mo.md("Pulsa **Leer evaluaciones oficiales** para cargar la muestra."),
     )
     evals_clean = load_clean_evals_df(

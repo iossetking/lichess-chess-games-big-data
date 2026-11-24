@@ -6,6 +6,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
     from pathlib import Path
 
     import chess
@@ -46,20 +47,39 @@ def _():
     STOCKFISH_ADAPTER_PATH = MODELS_DIR / "maia3_lora_stockfish.pt"
     SEED = 42
 
+    def _env_int(name: str, fallback: int) -> int:
+        try:
+            return int(os.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
     def load_positions() -> pl.DataFrame:
-        """Read the human-moves sample, or build a small one from Lichess."""
+        """Read the human-moves sample, or stream one from Lichess and cache it."""
         if POSITIONS_PATH.exists():
             return pl.read_parquet(POSITIONS_PATH)
-        raw = parse_pgn_sample_df(games_sample_url(2025, 1), max_games=1200)
-        return extract_positions_df(
-            clean_games_df(raw, min_elo=1800), max_positions=8000
+        target = _env_int("LICHESS_MAIA_MAX_TRAIN", 8000)
+        raw = parse_pgn_sample_df(
+            games_sample_url(2025, 1), max_games=max(1200, target // 30)
         )
+        frame = extract_positions_df(
+            clean_games_df(raw, min_elo=1800), max_positions=target
+        )
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(POSITIONS_PATH)
+        return frame
 
     def load_evals() -> pl.DataFrame:
-        """Read the Stockfish sample, or build a small one from Lichess."""
+        """Read the Stockfish sample, or stream one from Lichess and cache it."""
         if EVALS_PATH.exists():
             return pl.read_parquet(EVALS_PATH)
-        return load_clean_evals_df(evals_url(), max_evals=8000, min_depth=20)
+        frame = load_clean_evals_df(
+            evals_url(),
+            max_evals=_env_int("LICHESS_MAIA_MAX_TRAIN", 8000),
+            min_depth=20,
+        )
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(EVALS_PATH)
+        return frame
 
     def split_by_game(
         frame: pl.DataFrame, fraction: float = 0.1
@@ -196,17 +216,17 @@ def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
 
 @app.cell
 def _(mo):
-    import os
+    import os as _os_maia
 
     def _env_int(name: str, fallback: int) -> int:
         try:
-            return int(os.environ[name])
+            return int(_os_maia.environ[name])
         except (KeyError, ValueError):
             return fallback
 
     def _env_float(name: str, fallback: float) -> float:
         try:
-            return float(os.environ[name])
+            return float(_os_maia.environ[name])
         except (KeyError, ValueError):
             return fallback
 

@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import copy
+    import os
     from pathlib import Path
 
     import chess
@@ -51,20 +52,39 @@ def _():
     POSITIONS_PATH = PROCESSED_DIR / "positions_games_sample.parquet"
     EVALS_PATH = PROCESSED_DIR / "evals_clean_sample.parquet"
 
+    def _env_int(name: str, fallback: int) -> int:
+        try:
+            return int(os.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
     def load_positions() -> pl.DataFrame:
-        """Read the Stage 1 sample, or build a small one from Lichess directly."""
+        """Read the Stage 1 sample, or stream one from Lichess and cache it."""
         if POSITIONS_PATH.exists():
             return pl.read_parquet(POSITIONS_PATH)
-        raw = parse_pgn_sample_df(games_sample_url(2025, 1), max_games=1200)
-        return extract_positions_df(
-            clean_games_df(raw, min_elo=1800), max_positions=8000
+        target = _env_int("LICHESS_MAX_HUMAN", 8000)
+        raw = parse_pgn_sample_df(
+            games_sample_url(2025, 1), max_games=max(1200, target // 30)
         )
+        frame = extract_positions_df(
+            clean_games_df(raw, min_elo=1800), max_positions=target
+        )
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(POSITIONS_PATH)
+        return frame
 
     def load_evals() -> pl.DataFrame:
-        """Read the Stage 2 sample, or build a small one from Lichess directly."""
+        """Read the Stage 2 sample, or stream one from Lichess and cache it."""
         if EVALS_PATH.exists():
             return pl.read_parquet(EVALS_PATH)
-        return load_clean_evals_df(evals_url(), max_evals=8000, min_depth=20)
+        frame = load_clean_evals_df(
+            evals_url(),
+            max_evals=_env_int("LICHESS_MAX_EVAL", 8000),
+            min_depth=20,
+        )
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(EVALS_PATH)
+        return frame
 
     plt.rcParams.update(
         {"axes.spines.top": False, "axes.spines.right": False, "figure.dpi": 100}
@@ -183,11 +203,11 @@ def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
 
 @app.cell
 def _(evals_df, mo, positions_df):
-    import os
+    import os as _os_params
 
     def _env_int(name: str, fallback: int) -> int:
         try:
-            return int(os.environ[name])
+            return int(_os_params.environ[name])
         except (KeyError, ValueError):
             return fallback
 

@@ -13,7 +13,7 @@ La unión de ambos es: foto del tablero → FEN → jugada sugerida.
 
 ```bash
 uv sync
-git lfs pull   # descarga los checkpoints versionados en data/models/
+git lfs pull   # descarga checkpoints y muestras versionados con Git LFS
 ```
 
 Los checkpoints se guardan a media precisión (`float16`) para ocupar la mitad y
@@ -26,8 +26,9 @@ generan con los entrenadores de `scripts/` (ver la sección de visión).
 
 Todo se lee directamente de `database.lichess.org`; no se necesita descargar un
 mes completo. Cada cuaderno cierra el flujo HTTP en cuanto reúne la muestra
-pedida y guarda sus resultados en `data/processed/` (ignorado por git) y
-`data/models/` (versionado con Git LFS).
+pedida y guarda sus resultados en `data/processed/` y `data/models/`, ambos
+versionados con Git LFS (las muestras limpias y los checkpoints son pequeños;
+los archivos crudos siguen fuera de Git).
 
 | Cuaderno | Contenido | Salidas |
 |---|---|---|
@@ -61,6 +62,9 @@ porque al cargar los tensores vuelven a `float32`.
 - `data/models/` se versiona con **Git LFS**; `git lfs pull` descarga los pesos
   y un `.pt` sin descargar se detecta con un mensaje claro en vez de un error de
   deserialización.
+- `data/processed/*.parquet` también se versiona con **Git LFS**: las muestras
+  limpias ocupan pocos MB (67 mil posiciones ≈ 3 MB) y así el cuaderno 2 o 3
+  arrancan en Colab sin volver a descargar nada.
 - La validación cruzada ya no escribe los pesos de cada partición en
   `data/models/cv/`: se conservan en memoria mientras dura el cuaderno, así que
   no deja cientos de megabytes de checkpoints temporales.
@@ -144,8 +148,20 @@ y lanzar el entrenamiento pesado en una GPU de Colab con `colab-cli`:
 
 | Cuaderno | Variables |
 |---|---|
+| `01_eda_and_cleaning.py` | `LICHESS_YEAR_FROM`, `LICHESS_YEAR_TO`, `LICHESS_MONTH_FROM`, `LICHESS_MONTH_TO`, `LICHESS_MAX_GAMES`, `LICHESS_MIN_ELO`, `LICHESS_MAX_POSITIONS`, `LICHESS_MAX_EVALS`, `LICHESS_MIN_DEPTH` |
 | `02_model_scratch_and_finetune.py` | `LICHESS_MAX_HUMAN`, `LICHESS_MAX_EVAL`, `LICHESS_EPOCHS_STAGE1`, `LICHESS_EPOCHS_STAGE2`, `LICHESS_EPOCHS_LORA`, `LICHESS_LORA_RANK`, `LICHESS_N_FOLDS`, `LICHESS_CV_WEIGHT`, `LICHESS_CV_LORA` |
 | `03_maia.py` | `LICHESS_MAIA_MODEL`, `LICHESS_MAIA_MAX_TRAIN`, `LICHESS_MAIA_EPOCHS`, `LICHESS_MAIA_RANK`, `LICHESS_MAIA_LR`, `LICHESS_MAIA_ELO` |
+
+Sin interfaz, el cuaderno 1 descarga los archivos oficiales **en streaming**
+(cierra el HTTP en cuanto reúne la muestra) y escribe los Parquet; los
+cuadernos 2 y 3 reutilizan esos Parquet y, si faltan, generan su propia muestra.
+Ejemplo de muestra grande en Colab:
+
+```bash
+LICHESS_YEAR_FROM=2024 LICHESS_YEAR_TO=2025 LICHESS_MAX_GAMES=20000 \
+LICHESS_MAX_POSITIONS=500000 LICHESS_MAX_EVALS=500000 \
+uv run python notebooks/01_eda_and_cleaning.py
+```
 
 Ejemplo de prueba local mínima (segundos):
 

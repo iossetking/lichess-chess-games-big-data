@@ -1,8 +1,8 @@
-"""Head-only LoRA on the from-scratch policy network.
+"""LoRA fine-tuning across the residual tower and the spatial head.
 
-The adapter is only the low-rank update to the two spatial head projections,
-because that head is where move selection lives. The residual tower stays
-exactly as Stage 1 left it, so a fresh adapter reproduces Stage 1 outputs.
+The adapters are low-rank updates on every residual convolution, the two head
+projections and the 64x64 geometry bias. The Stage 1 weights stay exactly as
+they were, so a fresh adapter reproduces Stage 1 outputs.
 """
 
 import chess
@@ -12,6 +12,9 @@ import torch
 from torch import nn
 
 from lichess_pipeline.model.scratch_lora import (
+    LoRABias,
+    LoRAConv2d,
+    LoRALinear,
     LoRAPolicyNet,
     apply_head_lora,
     count_trainable_parameters,
@@ -42,7 +45,7 @@ def tiny_dataset(size: int = 4):
     return make_tensor_dataset(frame, "fen", "move_uci")
 
 
-def test_fresh_head_lora_keeps_stage_one_outputs_and_freezes_the_base():
+def test_fresh_lora_keeps_stage_one_outputs_and_freezes_the_base():
     model = tiny_model()
     features = torch.rand(3, 18, 8, 8)
     before = model(features)
@@ -59,7 +62,19 @@ def test_fresh_head_lora_keeps_stage_one_outputs_and_freezes_the_base():
         for name, parameter in wrapped.named_parameters()
         if parameter.requires_grad
     )
-    assert isinstance(wrapped.base.head.proj_from, nn.Linear) is False
+    # The tower keeps learning capacity: every residual conv has an adapter.
+    assert isinstance(wrapped.base.blocks[0].conv1, LoRAConv2d)
+    assert isinstance(wrapped.base.blocks[0].conv2, LoRAConv2d)
+    assert isinstance(wrapped.base.head.proj_from, LoRALinear)
+    assert isinstance(wrapped.base.head.spatial_bias, LoRABias)
+
+
+def test_lora_adapts_the_whole_network_not_only_the_head():
+    wrapped = apply_head_lora(tiny_model(), rank=4, alpha=8.0)
+    trainable, total = count_trainable_parameters(wrapped)
+
+    # A head-only adapter would be a tiny fraction of the 1.2M-parameter model.
+    assert trainable > total * 0.05
 
 
 def test_head_lora_rejects_a_non_positive_rank():
@@ -91,21 +106,29 @@ def test_train_head_lora_returns_scratch_style_history_and_a_best_epoch():
         assert best["val_loss"] == pytest.approx(model.best_val_loss)
 
 
-def test_train_head_lora_moves_the_adapter_and_never_the_base():
+def test_train_head_lora_moves_the_adapters_and_never_the_base():
     model = apply_head_lora(tiny_model(), rank=4, alpha=8.0)
     dataset = tiny_dataset()
-    base_before = model.base.head.proj_from.base.weight.detach().clone()
+    base_convs = model.base.blocks[0].conv1.base.weight.detach().clone()
+    base_head = model.base.head.proj_from.base.weight.detach().clone()
+    base_bias = model.base.head.spatial_bias.base.detach().clone()
     buffers_before = {
         name: buffer.detach().clone() for name, buffer in model.base.named_buffers()
     }
-    adapter_before = model.base.head.proj_from.lora_b.detach().clone()
+    adapter_before = model.base.blocks[0].conv1.lora_b.detach().clone()
 
     train_head_lora(model, dataset, dataset, epochs=2, lr=1e-2, batch_size=4)
 
     # The frozen Stage 1 weights survive; merging is what writes the update back.
-    assert torch.allclose(base_before, model.base.head.proj_from.base.weight)
-    assert not model.base.head.proj_from.base.weight.requires_grad
-    assert not torch.allclose(adapter_before, model.base.head.proj_from.lora_b)
+    assert torch.allclose(base_convs, model.base.blocks[0].conv1.base.weight)
+    assert torch.allclose(base_head, model.base.head.proj_from.base.weight)
+    assert torch.allclose(base_bias, model.base.head.spatial_bias.base)
+    assert not model.base.blocks[0].conv1.base.weight.requires_grad
+    assert not torch.allclose(adapter_before, model.base.blocks[0].conv1.lora_b)
+    assert not torch.allclose(
+        torch.zeros_like(model.base.head.spatial_bias.lora_b),
+        model.base.head.spatial_bias.lora_b,
+    )
     # BatchNorm statistics must not drift either: the base stays in eval mode.
     for name, buffer in model.base.named_buffers():
         assert torch.equal(buffers_before[name], buffer)
@@ -140,7 +163,9 @@ def test_merged_model_reproduces_the_adapter_network():
         actual = merged(features)
 
     assert isinstance(merged, ChessPolicyNet)
+    assert isinstance(merged.blocks[0].conv1, nn.Conv2d)
     assert isinstance(merged.head.proj_from, nn.Linear)
+    assert isinstance(merged.head.spatial_bias, nn.Parameter)
     assert torch.allclose(expected, actual, atol=1e-4)
 
 
@@ -167,10 +192,12 @@ def test_merged_model_predicts_legal_moves():
     assert all(move in legal for move, _ in predictions)
 
 
-def test_head_lora_adapter_uses_the_requested_rank():
+def test_adapters_use_the_requested_rank_on_convs_and_projections():
     model = apply_head_lora(tiny_model(), rank=16, alpha=32.0)
+    convolution = model.base.blocks[0].conv1
     projection = model.base.head.proj_to
 
-    assert isinstance(projection, nn.Linear) is False
+    assert convolution.lora_a.shape == (16, TINY_CHANNELS * 3 * 3)
+    assert convolution.lora_b.shape == (TINY_CHANNELS, 16)
     assert projection.lora_a.shape == (16, TINY_CHANNELS)
-    assert projection.lora_b.shape == (projection.base.out_features, 16)
+    assert model.base.head.spatial_bias.lora_a.shape == (16, 64)

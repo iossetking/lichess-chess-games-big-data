@@ -109,13 +109,15 @@ def _(mo):
     |---|---|---|
     | **Desde cero** | Red convolucional con jugadas humanas de Lichess | `approach1_scratch.pt` |
     | **Ajuste de pesos** | Todos los pesos, con `FEN -> mejor jugada` de Stockfish | `approach1_weight_ftuning.pt` |
-    | **Ajuste LoRA** | Solo un adaptador de bajo rango sobre la cabeza de jugadas | `approach1_lora_ftuning.pt` |
+    | **Ajuste LoRA** | Adaptadores de bajo rango en el tronco residual y la cabeza | `approach1_lora_ftuning.pt` |
 
     **Por qué dos ajustes finos.** Con una muestra pequeña, actualizar todos los
     pesos puede deshacer lo aprendido en la etapa 1 y bajar el Top-1. LoRA
-    congela la red y entrena únicamente una corrección de bajo rango `B·A` sobre
-    la capa final, así que el modelo ajustado sigue siendo casi idéntico al de
-    partida y solo se aparta de él en la dirección que mejora la validación.
+    congela la red y entrena únicamente correcciones de bajo rango `B·A` en las
+    convoluciones del tronco, las proyecciones de la cabeza y su sesgo de
+    geometría: unos 86 mil parámetros (≈7 % de la red). Así el modelo ajustado
+    sigue siendo casi idéntico al de partida y solo se aparta de él en la
+    dirección que mejora la validación.
     Además se conserva la época con la menor pérdida de validación, no la última.
 
     **Cómo leer las comparaciones.** La exactitud de la etapa 1 se mide con

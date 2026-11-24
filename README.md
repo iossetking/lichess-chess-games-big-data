@@ -115,7 +115,8 @@ Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
   prueban dos formas de especializar el modelo con Stockfish. Ajustar todos los
   pesos puede deshacer parte de lo aprendido con una muestra pequeña, así que
   también se ofrece **LoRA**: la red se congela y solo se entrena una corrección
-  de bajo rango sobre las dos proyecciones de la cabeza de jugadas, conservando
+  de bajo rango sobre el tronco residual y las proyecciones de la cabeza de
+  jugadas, conservando
   la época con la menor pérdida de validación. El cuaderno compara los tres
   modelos y guarda cada uno por separado (`approach1_scratch.pt`,
   `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt`). El adaptador LoRA

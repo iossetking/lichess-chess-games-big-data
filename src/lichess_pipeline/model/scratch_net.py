@@ -104,7 +104,10 @@ class SpatialMoveHead(nn.Module):
         origins = self.proj_from(squares)
         destinations = self.proj_to(squares)
         logits = self.scale * (origins @ destinations.transpose(1, 2))
-        return (logits + self.spatial_bias).reshape(logits.shape[0], NUM_MOVE_CLASSES)
+        # While LoRA is training, ``spatial_bias`` is a module returning the
+        # frozen bias plus its low-rank update; otherwise it is the raw tensor.
+        bias = self.spatial_bias() if isinstance(self.spatial_bias, nn.Module) else self.spatial_bias
+        return (logits + bias).reshape(logits.shape[0], NUM_MOVE_CLASSES)
 
 
 class ChessPolicyNet(nn.Module):

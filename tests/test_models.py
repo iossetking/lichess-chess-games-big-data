@@ -3,13 +3,16 @@ import polars as pl
 import pytest
 import torch
 
+from lichess_pipeline.features import legal_move_mask
 from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
 from lichess_pipeline.model.scratch_net import (
+    PACKED_MASK_BYTES,
     ChessPolicyNet,
     evaluate_model,
     make_tensor_dataset,
     predict_top_moves,
     train_model,
+    unpack_legal_masks,
 )
 
 
@@ -79,6 +82,51 @@ def test_evaluate_model_reports_loss_and_top_k_accuracy():
     assert set(metrics) == {"loss", "top1", "top3"}
     assert metrics["top3"] >= metrics["top1"]
     assert 0.0 <= metrics["top1"] <= 1.0
+
+
+def test_make_tensor_dataset_uses_compact_uint8_and_bitpacked_masks():
+    fens = [
+        chess.STARTING_FEN,
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+    ]
+    frame = pl.DataFrame({"fen": fens, "move_uci": ["e2e4", "e7e5"]})
+    dataset = make_tensor_dataset(frame)
+    features, targets, packed_masks = dataset.tensors
+
+    assert features.dtype == torch.uint8
+    assert features.shape == (2, 18, 8, 8)
+    assert targets.dtype == torch.long
+    assert packed_masks.dtype == torch.uint8
+    assert packed_masks.shape == (2, PACKED_MASK_BYTES)
+
+    unpacked = unpack_legal_masks(packed_masks)
+    assert unpacked.dtype == torch.bool
+    for idx, fen in enumerate(fens):
+        expected = torch.from_numpy(legal_move_mask(fen))
+        assert torch.equal(unpacked[idx], expected)
+
+
+def test_train_and_evaluate_accept_subset_without_copying_tensors():
+    sample_df = pl.DataFrame(
+        {
+            "fen": [
+                chess.STARTING_FEN,
+                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            ]
+            * 6,
+            "move_uci": ["e2e4", "e7e5"] * 6,
+        }
+    )
+    dataset = make_tensor_dataset(sample_df)
+    train_sub = torch.utils.data.Subset(dataset, list(range(8)))
+    val_sub = torch.utils.data.Subset(dataset, list(range(8, 12)))
+
+    model = ChessPolicyNet(channels=8, depth=1)
+    history = train_model(model, train_sub, val_sub, epochs=1, batch_size=4)
+    metrics = evaluate_model(model, val_sub, batch_size=4)
+
+    assert len(history) == 1
+    assert set(metrics) == {"loss", "top1", "top3"}
 
 
 def test_make_tensor_dataset_rejects_an_empty_frame():

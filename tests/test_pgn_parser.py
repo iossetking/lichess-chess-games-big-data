@@ -57,6 +57,23 @@ def test_extract_positions_df_replays_legal_moves():
     assert positions["turn"].to_list()[:2] == ["w", "b"]
 
 
+def test_extract_positions_df_shuffles_games_across_months_by_default():
+    base = parse_pgn_game(RAW_GAME_WITH_COMMENTS)
+    games = [
+        {**base, "game_id": f"m{month:02d}_g{idx:02d}"}
+        for month in range(1, 7)
+        for idx in range(10)
+    ]
+    df = pl.DataFrame(games)
+    positions = extract_positions_df(df, max_positions=120)
+    sampled_months = {gid.split("_")[0] for gid in positions["game_id"].to_list()}
+    assert len(positions) == 120
+    assert len(sampled_months) >= 3
+
+    sequential = extract_positions_df(df, max_positions=120, shuffle=False)
+    assert {gid.split("_")[0] for gid in sequential["game_id"].to_list()} == {"m01"}
+
+
 def test_parse_eval_line_selects_max_depth_and_handles_missing_pvs():
     valid_json = json.dumps(
         {

@@ -180,9 +180,9 @@ En Colab **no se puede cambiar el tipo de runtime (CPU ↔ T4 ↔ L4 ↔ A100) d
 3. **Paso 3 (Local, sin Colab)**: ejecuta `04_model_playground.py` y las demos de visión en vivo directamente en tu equipo.
 
 > **Elección de GPU y límite de RAM en Colab:**
-> - **T4** (16 GB VRAM, ~12.7 GB RAM del sistema): ideal para corridas pequeñas/medianas (hasta ~200k–300k posiciones, `maia3-5m` y YOLO).
+> - **T4** (16 GB VRAM, ~12.7 GB RAM del sistema): ideal para corridas pequeñas/medianas (hasta ~500k posiciones en el cuaderno `02` gracias a tensores `uint8` + máscaras empaquetadas en bits y particiones CV sin duplicar tensores; `maia3-5m` y YOLO).
 > - **L4** (24 GB VRAM, ~53 GB RAM): recomendada para 500k–1M posiciones y `maia3-23m`.
-> - **A100** (40/80 GB VRAM, ~83 GB RAM): recomendada si subes a 2M posiciones con validación cruzada de 5 particiones en el cuaderno `02` (por consumo de RAM del sistema) y `maia3-23m` en el `03`.
+> - **A100** (40/80 GB VRAM, ~83 GB RAM): recomendada si subes a 2M posiciones con validación cruzada de 5 particiones en el cuaderno `02` y `maia3-23m` en el `03`.
 
 > **Importante antes de lanzar:** `colab exec -f <cuaderno>` envía tu archivo local del cuaderno, pero `src/` y `scripts/` salen del `git clone` dentro de la sesión. Haz `git push` antes de iniciar para que el código del repositorio remoto coincida con tu copia local.
 
@@ -203,7 +203,8 @@ colab exec -s lichess-data -f notebooks/01_eda_and_cleaning.py --timeout 0 \
   --env LICHESS_YEAR_FROM=2024 --env LICHESS_YEAR_TO=2025 \
   --env LICHESS_MONTH_FROM=1 --env LICHESS_MONTH_TO=12 \
   --env LICHESS_MAX_GAMES=20000 --env LICHESS_MAX_POSITIONS=250000 \
-  --env LICHESS_MAX_EVALS=250000
+  --env LICHESS_MAX_EVALS=250000 \
+  --env LICHESS_MIN_ELO=1900 --env LICHESS_MIN_DEPTH=20
 
 # 4. Guarda los Parquet limpios en tu equipo local (data/processed/)
 mkdir -p data/processed
@@ -486,4 +487,4 @@ Estas utilidades solo localizan y rectifican el tablero (no predicen jugadas; el
 
 ### 6.4 Límites de escala
 
-El pipeline actual materializa los datasets de entrenamiento en memoria RAM (DataFrames de Polars, tensores de tablero y máscaras de legalidad de 4096/4352 booleanos por FEN). Para entrenar a escala de decenas de millones de posiciones en un servidor de producción, la evolución natural consiste en escribir Parquet por bloques y sustituir `TensorDataset` por un `IterableDataset` que codifique cada FEN y su máscara bajo demanda, manteniendo intactos el parseo y el contrato de los modelos.
+El pipeline actual materializa los datasets de entrenamiento en memoria RAM (DataFrames de Polars, tensores de tablero `uint8` y máscaras de legalidad empaquetadas en bits en el cuaderno `02`, ~1.6 KB/posición, y booleanas de 4352 clases en `03`). Para entrenar a escala de decenas de millones de posiciones en un servidor de producción, la evolución natural consiste en escribir Parquet por bloques y sustituir `TensorDataset` por un `IterableDataset` que codifique cada FEN y su máscara bajo demanda, manteniendo intactos el parseo y el contrato de los modelos.

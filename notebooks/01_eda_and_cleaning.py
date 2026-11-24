@@ -322,11 +322,11 @@ def _(
         ),
     )
     max_games = mo.ui.number(
-        value=_clamp(_env_int("LICHESS_MAX_GAMES", 3000), 200, 50000),
+        value=_clamp(_env_int("LICHESS_MAX_GAMES", 3000), 200, 500_000),
         start=200,
-        stop=50000,
+        stop=500_000,
         step=200,
-        label="Partidas a leer por mes del .pgn.zst",
+        label="Partidas totales a leer (repartidas entre los meses)",
     )
     min_elo = mo.ui.slider(
         start=1500,
@@ -400,13 +400,14 @@ def _(
                 f"{month_label(months_selected[0])} … "
                 f"{month_label(months_selected[-1])}"
             )
-        total_cap = int(max_games.value) * len(months_selected)
+        total_cap = int(max_games.value)
+        per_month = max(1, round(total_cap / len(months_selected)))
         _blocks = [
             mo.callout(
                 mo.md(
                     f"**{len(months_selected)}** meses seleccionados: {listed}.\n\n"
-                    f"Tope de lectura: **{total_cap:,}** partidas "
-                    f"({int(max_games.value):,} por mes)."
+                    f"Tope de lectura: **{total_cap:,}** partidas en total "
+                    f"(~{per_month:,} por mes)."
                 ),
                 kind="info",
             )
@@ -416,8 +417,8 @@ def _(
                 mo.callout(
                     mo.md(
                         f"Es una muestra grande: hasta **{total_cap:,}** partidas se "
-                        "guardan en memoria a la vez. Baja las partidas por mes o "
-                        "reduce el rango si el equipo se queda sin memoria."
+                        "guardan en memoria a la vez. Baja las partidas totales si "
+                        "el equipo se queda sin memoria."
                     ),
                     kind="warn",
                 )
@@ -444,9 +445,9 @@ def _(mo):
         [
             mo.md("## 1. Partidas estándar"),
             mo.md(
-                "Pulsa el botón para descargar el prefijo indicado de **cada mes "
-                "seleccionado**. Se descartan las partidas que no empiezan con jugadas "
-                "legales."
+                "Pulsa el botón para descargar y repartir el tope de partidas entre "
+                "**los meses seleccionados**. Se descartan las partidas que no "
+                "empiezan con jugadas legales."
             ),
             games_button,
         ]
@@ -480,13 +481,20 @@ def _(
     monthly_rows = []
     skipped_months = []
     _failures = []
+    _total_games = int(max_games.value)
+    _base_quota, _extra_months = divmod(_total_games, len(months_selected))
     with mo.status.spinner(title="Leyendo los meses seleccionados…") as _spinner:
-        for _game_year, _game_month in months_selected:
+        for _index, (_game_year, _game_month) in enumerate(months_selected):
+            _month_quota = _base_quota + (1 if _index < _extra_months else 0)
+            if _month_quota <= 0:
+                continue
             source = games_sample_url(_game_year, _game_month)
-            _spinner.update(subtitle=f"Leyendo `{source.rsplit('/', 1)[-1]}`…")
+            _spinner.update(
+                subtitle=f"Leyendo `{source.rsplit('/', 1)[-1]}` ({_month_quota:,} partidas)…"
+            )
             try:
                 month_frame = parse_pgn_sample_df(
-                    source, max_games=int(max_games.value)
+                    source, max_games=_month_quota
                 )
             except LichessConnectionError as exc:
                 skipped_months.append(month_label((_game_year, _game_month)))
@@ -516,7 +524,7 @@ def _(
             mo.md(
                 f"Leídas **{raw_games.height:,}** partidas de "
                 f"**{len(frames)}** meses "
-                f"({int(max_games.value):,} bloques PGN solicitados por mes)."
+                f"({_total_games:,} bloques PGN solicitados en total)."
             ),
             kind="success",
         ),

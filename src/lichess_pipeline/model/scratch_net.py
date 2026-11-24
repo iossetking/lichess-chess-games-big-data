@@ -29,9 +29,10 @@ import numpy as np
 import polars as pl
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from lichess_pipeline.features import (
+    BOARD_SIZE,
     LEGACY_NUM_PLANES,
     NUM_MOVE_CLASSES,
     NUM_PLANES,
@@ -44,6 +45,8 @@ from lichess_pipeline.features import (
 )
 
 MASK_VALUE = -1e9
+PACKED_MASK_BYTES = NUM_MOVE_CLASSES // 8  # 512 bytes for 4096 legal-move bits
+_UNPACK_BITS = torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], dtype=torch.uint8)
 DEFAULT_EPOCHS = 5
 DEFAULT_LR = 1e-3
 DEFAULT_BATCH_SIZE = 256
@@ -167,39 +170,60 @@ class LegacyChessPolicyNet(nn.Module):
         return self.head(torch.flatten(self.features(x), start_dim=1))
 
 
+def unpack_legal_masks(masks: torch.Tensor) -> torch.Tensor:
+    """Return a ``(B, 4096)`` boolean mask from either bool or bit-packed input."""
+    if masks.shape[-1] == NUM_MOVE_CLASSES:
+        return masks.to(torch.bool)
+    if masks.shape[-1] != PACKED_MASK_BYTES:
+        raise ValueError(
+            f"Expected mask width {NUM_MOVE_CLASSES} or {PACKED_MASK_BYTES}, "
+            f"got {masks.shape[-1]}"
+        )
+    bits = _UNPACK_BITS.to(masks.device)
+    return ((masks.unsqueeze(-1) & bits) != 0).reshape(
+        masks.shape[0], NUM_MOVE_CLASSES
+    )
+
+
 def make_tensor_dataset(
     df: pl.DataFrame, fen_col: str = "fen", move_col: str = "move_uci"
 ) -> TensorDataset:
-    """Encode rows into ``(board tensor, move class, legal mask)`` triples.
+    """Encode rows into compact ``(board, move class, packed legal mask)`` triples.
 
     Board and move are side-to-move canonical, and the legal mask uses the
     same mirrored indices, so validation ranks moves exactly as inference
-    does. The mask costs 4096 booleans per position.
+    does. Binary board planes are stored as ``uint8`` (1,152 B/row) and the
+    4096-bit legal mask is bit-packed into 512 ``uint8`` bytes (~1.6 KB/row
+    total instead of ~8.7 KB/row), then unpacked on the fly per mini-batch.
     """
-    if df.height == 0:
+    count = df.height
+    if count == 0:
         raise ValueError("Cannot build a tensor dataset from an empty frame")
     fens = df[fen_col].to_list()
-    features = torch.from_numpy(np.stack([encode_fen(fen) for fen in fens]))
-    targets = torch.tensor(
-        [
-            move_to_index(canonical_move(fen, move))
-            for fen, move in zip(fens, df[move_col].to_list(), strict=True)
-        ],
-        dtype=torch.long,
+    moves = df[move_col].to_list()
+    features = np.empty((count, NUM_PLANES, BOARD_SIZE, BOARD_SIZE), dtype=np.uint8)
+    targets = np.empty(count, dtype=np.int64)
+    masks = np.empty((count, PACKED_MASK_BYTES), dtype=np.uint8)
+    for index, (fen, move) in enumerate(zip(fens, moves, strict=True)):
+        features[index] = encode_fen(fen)
+        targets[index] = move_to_index(canonical_move(fen, move))
+        masks[index] = np.packbits(legal_move_mask(fen))
+    return TensorDataset(
+        torch.from_numpy(features),
+        torch.from_numpy(targets),
+        torch.from_numpy(masks),
     )
-    masks = torch.from_numpy(np.stack([legal_move_mask(fen) for fen in fens]))
-    return TensorDataset(features, targets, masks)
 
 
-def _loader(dataset: TensorDataset, batch_size: int, shuffle: bool) -> DataLoader:
+def _loader(dataset: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 def _masked_logits(
     model: nn.Module, features: torch.Tensor, masks: torch.Tensor
 ) -> torch.Tensor:
-    logits = model(features)
-    return logits.masked_fill(~masks.to(torch.bool), MASK_VALUE)
+    logits = model(features.to(dtype=torch.float32))
+    return logits.masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
 
 
 def _evaluate(
@@ -229,7 +253,7 @@ def _evaluate(
 
 def evaluate_model(
     model: nn.Module,
-    dataset: TensorDataset,
+    dataset: Dataset,
     batch_size: int = DEFAULT_BATCH_SIZE,
     device: str | torch.device | None = None,
 ) -> dict[str, float]:
@@ -258,8 +282,8 @@ def _cpu_state(model: nn.Module) -> dict[str, torch.Tensor]:
 
 def train_model(
     model: nn.Module,
-    train_ds: TensorDataset,
-    val_ds: TensorDataset,
+    train_ds: Dataset,
+    val_ds: Dataset,
     epochs: int = DEFAULT_EPOCHS,
     lr: float = DEFAULT_LR,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -377,4 +401,5 @@ __all__ = [
     "pick_device",
     "predict_top_moves",
     "train_model",
+    "unpack_legal_masks",
 ]

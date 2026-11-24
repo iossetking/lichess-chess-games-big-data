@@ -227,15 +227,27 @@ def clean_games_df(
 
 
 def extract_positions_df(
-    clean_df: pl.DataFrame, max_positions: int = DEFAULT_MAX_POSITIONS
+    clean_df: pl.DataFrame,
+    max_positions: int = DEFAULT_MAX_POSITIONS,
+    *,
+    shuffle: bool = True,
+    seed: int = 42,
 ) -> pl.DataFrame:
     """Turn cleaned games into ``(fen, move_uci)`` training rows.
 
     Each row records the position *before* the move, so ``fen`` plus
-    ``move_uci`` is exactly what a policy model must learn.
+    ``move_uci`` is exactly what a policy model must learn. When ``shuffle`` is
+    true (the default), games are shuffled deterministically before replay so
+    hitting ``max_positions`` draws evenly across all selected months instead
+    of exhausting only the earliest ones.
     """
+    source_df = (
+        clean_df.sample(fraction=1.0, shuffle=True, seed=seed)
+        if shuffle and clean_df.height > 1
+        else clean_df
+    )
     rows: list[dict[str, object]] = []
-    for game in clean_df.iter_rows(named=True):
+    for game in source_df.iter_rows(named=True):
         if len(rows) >= max_positions:
             break
         board = chess.Board()

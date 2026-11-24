@@ -271,11 +271,11 @@ def _(mo):
         value=_base_label,
         label="Modelo base",
     )
-    max_train = mo.ui.slider(
-        start=2000,
-        stop=200000,
-        step=2000,
-        value=_clamp(_env_int("LICHESS_MAIA_MAX_TRAIN", 20000), 2000, 200000),
+    max_train = mo.ui.number(
+        start=1000,
+        stop=5_000_000,
+        step=1000,
+        value=_clamp(_env_int("LICHESS_MAIA_MAX_TRAIN", 20000), 1000, 5_000_000),
         label="Posiciones máximas por dataset",
     )
     epochs = mo.ui.slider(

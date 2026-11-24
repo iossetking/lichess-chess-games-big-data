@@ -3,7 +3,7 @@
 import polars as pl
 import pytest
 
-from lichess_pipeline.model.splits import kfold, split_holdout
+from lichess_pipeline.model.splits import kfold, kfold_indices, split_holdout
 
 
 def make_frame() -> pl.DataFrame:
@@ -60,6 +60,26 @@ def test_kfold_balances_the_validation_slices():
     sizes = [validation.height for _, validation in kfold(frame, n_folds=4)]
 
     assert max(sizes) - min(sizes) <= 1
+
+
+@pytest.mark.parametrize("group_col", ["game_id", None])
+def test_kfold_indices_matches_kfold_partitions(group_col):
+    frame = make_frame()
+    df_folds = kfold(frame, n_folds=5, group_col=group_col, seed=42)
+    idx_folds = kfold_indices(frame, n_folds=5, group_col=group_col, seed=42)
+
+    assert len(idx_folds) == len(df_folds)
+    for (train_df, val_df), (train_idx, val_idx) in zip(
+        df_folds, idx_folds, strict=True
+    ):
+        assert set(train_idx).isdisjoint(val_idx)
+        assert sorted(train_idx + val_idx) == list(range(frame.height))
+        assert set(frame[train_idx]["position"].to_list()) == set(
+            train_df["position"].to_list()
+        )
+        assert set(frame[val_idx]["position"].to_list()) == set(
+            val_df["position"].to_list()
+        )
 
 
 def test_split_rejects_invalid_arguments():

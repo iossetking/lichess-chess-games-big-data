@@ -58,6 +58,67 @@ def split_holdout(
     return shuffled.head(n_held), shuffled.tail(shuffled.height - n_held)
 
 
+def kfold_indices(
+    frame: pl.DataFrame,
+    n_folds: int = 5,
+    group_col: str | None = None,
+    seed: int = 42,
+) -> list[tuple[list[int], list[int]]]:
+    """Return ``[(train_indices, validation_indices), ...]`` covering ``frame``.
+
+    Matches :func:`kfold` but returns row positions so callers can slice an
+    already-encoded :class:`torch.utils.data.Dataset` via ``Subset`` without
+    duplicating tensors in RAM.
+    """
+    if n_folds < 2:
+        raise ValueError("n_folds must be at least 2")
+    if group_col is not None:
+        groups = _shuffled_groups(frame, group_col, seed)
+        if len(groups) < n_folds:
+            raise ValueError(
+                f"n_folds ({n_folds}) exceeds the number of distinct "
+                f"'{group_col}' values ({len(groups)})"
+            )
+        rows_by_group: dict[object, list[int]] = {}
+        for row_index, value in enumerate(frame[group_col].to_list()):
+            rows_by_group.setdefault(value, []).append(row_index)
+        chunks = [chunk.to_list() for chunk in _chunks(groups, n_folds)]
+        folds: list[tuple[list[int], list[int]]] = []
+        for fold_index, val_groups in enumerate(chunks):
+            val_indices = [
+                row_index for group in val_groups for row_index in rows_by_group[group]
+            ]
+            train_indices = [
+                row_index
+                for other_index, other_groups in enumerate(chunks)
+                if other_index != fold_index
+                for group in other_groups
+                for row_index in rows_by_group[group]
+            ]
+            folds.append((train_indices, val_indices))
+        return folds
+    if frame.height < n_folds:
+        raise ValueError(
+            f"n_folds ({n_folds}) exceeds the number of rows ({frame.height})"
+        )
+    shuffled = pl.Series(range(frame.height)).sample(
+        fraction=1.0, shuffle=True, seed=seed
+    )
+    chunks = [chunk.to_list() for chunk in _chunks(shuffled, n_folds)]
+    return [
+        (
+            [
+                row_index
+                for other_index, other_chunk in enumerate(chunks)
+                if other_index != fold_index
+                for row_index in other_chunk
+            ],
+            val_chunk,
+        )
+        for fold_index, val_chunk in enumerate(chunks)
+    ]
+
+
 def kfold(
     frame: pl.DataFrame,
     n_folds: int = 5,

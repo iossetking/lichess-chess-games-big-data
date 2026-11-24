@@ -46,6 +46,7 @@ def _():
     import marimo as mo
     import matplotlib.pyplot as plt
     import polars as pl
+    from torch.utils.data import Subset
 
     from lichess_pipeline.model.checkpoints import (
         compact_state_dict,
@@ -65,7 +66,7 @@ def _():
         predict_top_moves,
         train_model,
     )
-    from lichess_pipeline.model.splits import kfold, split_holdout
+    from lichess_pipeline.model.splits import kfold_indices, split_holdout
     from lichess_pipeline.pgn_parser import (
         clean_games_df,
         evals_url,
@@ -120,13 +121,14 @@ def _():
         EVALS_PATH,
         MODELS_DIR,
         POSITIONS_PATH,
+        Subset,
         apply_head_lora,
         chess,
         compact_state_dict,
         copy,
         count_trainable_parameters,
         evaluate_model,
-        kfold,
+        kfold_indices,
         load_evals,
         load_policy_checkpoint,
         load_positions,
@@ -426,7 +428,17 @@ def _(mo):
 
 
 @app.cell
-def _(eval_dev_df, human_dev_df, kfold, make_tensor_dataset, mo, n_folds, pl):
+def _(
+    Subset,
+    eval_dev_df,
+    eval_dev_ds,
+    human_dev_df,
+    human_dev_ds,
+    kfold_indices,
+    mo,
+    n_folds,
+    pl,
+):
     _folds = int(n_folds.value)
     mo.stop(
         min(human_dev_df["game_id"].n_unique(), eval_dev_df.height) < _folds,
@@ -440,12 +452,10 @@ def _(eval_dev_df, human_dev_df, kfold, make_tensor_dataset, mo, n_folds, pl):
             kind="warn",
         ),
     )
-    human_cv_folds = kfold(human_dev_df, n_folds=_folds, group_col="game_id")
-    eval_cv_folds = kfold(eval_dev_df, n_folds=_folds)
-    human_monitor_ds = make_tensor_dataset(human_cv_folds[0][1])
-    eval_monitor_ds = make_tensor_dataset(
-        eval_cv_folds[0][1], "fen", "best_move"
-    )
+    human_cv_folds = kfold_indices(human_dev_df, n_folds=_folds, group_col="game_id")
+    eval_cv_folds = kfold_indices(eval_dev_df, n_folds=_folds)
+    human_monitor_ds = Subset(human_dev_ds, human_cv_folds[0][1])
+    eval_monitor_ds = Subset(eval_dev_ds, eval_cv_folds[0][1])
 
     def cv_row(fold, model, evaluation, metrics, best_epoch):
         return {
@@ -494,13 +504,15 @@ def _(eval_dev_df, human_dev_df, kfold, make_tensor_dataset, mo, n_folds, pl):
 @app.cell
 def _(
     ChessPolicyNet,
+    Subset,
     compact_state_dict,
     cv_row,
     epochs_stage1,
     eval_cv_folds,
+    eval_dev_ds,
     evaluate_model,
     human_cv_folds,
-    make_tensor_dataset,
+    human_dev_ds,
     mean_history,
     mo,
     pl,
@@ -510,15 +522,15 @@ def _(
     _rows = []
     _histories = []
     scratch_fold_states = []
-    for _fold, ((_h_train, _h_val), (_e_train, _e_val)) in enumerate(
+    for _fold, ((_h_train_idx, _h_val_idx), (_e_train_idx, _e_val_idx)) in enumerate(
         zip(human_cv_folds, eval_cv_folds, strict=True), start=1
     ):
-        _h_val_ds = make_tensor_dataset(_h_val)
-        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
+        _h_val_ds = Subset(human_dev_ds, _h_val_idx)
+        _e_val_ds = Subset(eval_dev_ds, _e_val_idx)
         _model = ChessPolicyNet()
         _history = train_model(
             _model,
-            make_tensor_dataset(_h_train),
+            Subset(human_dev_ds, _h_train_idx),
             _h_val_ds,
             epochs=int(epochs_stage1.value),
             lr=1e-3,
@@ -616,12 +628,13 @@ def _(
 @app.cell
 def _(
     ChessPolicyNet,
+    Subset,
     cv_row,
     cv_weight,
     epochs_stage2,
     eval_cv_folds,
+    eval_dev_ds,
     evaluate_model,
-    make_tensor_dataset,
     mean_history,
     mo,
     pl,
@@ -641,15 +654,15 @@ def _(
     )
     _rows = []
     _histories = []
-    for _fold, ((_e_train, _e_val), _fold_state) in enumerate(
+    for _fold, ((_e_train_idx, _e_val_idx), _fold_state) in enumerate(
         zip(eval_cv_folds, scratch_fold_states, strict=True), start=1
     ):
-        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
+        _e_val_ds = Subset(eval_dev_ds, _e_val_idx)
         _model = ChessPolicyNet()
         _model.load_state_dict(_fold_state)
         _history = train_model(
             _model,
-            make_tensor_dataset(_e_train, "fen", "best_move"),
+            Subset(eval_dev_ds, _e_train_idx),
             _e_val_ds,
             epochs=int(epochs_stage2.value),
             lr=1e-4,
@@ -731,15 +744,16 @@ def _(
 @app.cell
 def _(
     ChessPolicyNet,
+    Subset,
     apply_head_lora,
     copy,
     cv_lora,
     cv_row,
     epochs_lora,
     eval_cv_folds,
+    eval_dev_ds,
     evaluate_model,
     lora_rank,
-    make_tensor_dataset,
     mean_history,
     merge_head_lora,
     mo,
@@ -761,10 +775,10 @@ def _(
     _rank = int(lora_rank.value)
     _rows = []
     _histories = []
-    for _fold, ((_e_train, _e_val), _fold_state) in enumerate(
+    for _fold, ((_e_train_idx, _e_val_idx), _fold_state) in enumerate(
         zip(eval_cv_folds, scratch_fold_states, strict=True), start=1
     ):
-        _e_val_ds = make_tensor_dataset(_e_val, "fen", "best_move")
+        _e_val_ds = Subset(eval_dev_ds, _e_val_idx)
         _base = ChessPolicyNet()
         _base.load_state_dict(_fold_state)
         _model = apply_head_lora(
@@ -772,7 +786,7 @@ def _(
         )
         _history = train_head_lora(
             _model,
-            make_tensor_dataset(_e_train, "fen", "best_move"),
+            Subset(eval_dev_ds, _e_train_idx),
             _e_val_ds,
             epochs=int(epochs_lora.value),
             lr=1e-3,

@@ -30,9 +30,13 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
-from lichess_pipeline.model.scratch_net import ChessPolicyNet, pick_device
+from lichess_pipeline.model.scratch_net import (
+    ChessPolicyNet,
+    pick_device,
+    unpack_legal_masks,
+)
 
 DEFAULT_RANK = 8
 DEFAULT_ALPHA = 16.0
@@ -281,8 +285,8 @@ def count_trainable_parameters(model: nn.Module) -> tuple[int, int]:
 
 def train_head_lora(
     model: LoRAPolicyNet,
-    train_ds: TensorDataset,
-    val_ds: TensorDataset,
+    train_ds: Dataset,
+    val_ds: Dataset,
     epochs: int = DEFAULT_EPOCHS,
     lr: float = DEFAULT_LR,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -402,8 +406,8 @@ MASK_VALUE = -1e9
 def _masked_logits(
     model: nn.Module, features: torch.Tensor, masks: torch.Tensor
 ) -> torch.Tensor:
-    logits = model(features)
-    return logits.masked_fill(~masks.to(torch.bool), MASK_VALUE)
+    logits = model(features.to(dtype=torch.float32))
+    return logits.masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
 
 
 def _validation_metrics(

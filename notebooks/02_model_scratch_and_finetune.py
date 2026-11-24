@@ -8,7 +8,36 @@ app = marimo.App(width="medium")
 def _():
     import copy
     import os
+    import sys
     from pathlib import Path
+
+    def _project_dir() -> Path:
+        """Find the repository when run from a checkout or a Colab session."""
+        if "__file__" in globals():
+            return Path(__file__).resolve().parents[1]
+        override = os.environ.get("LICHESS_PROJECT_DIR")
+        if override:
+            return Path(override).expanduser().resolve()
+        for candidate in (Path.cwd(), Path("/content/lichess-chess-games-big-data")):
+            if (candidate / "src" / "lichess_pipeline").is_dir():
+                return candidate
+        return Path.cwd()
+
+    PROJECT_DIR = _project_dir()
+    if (PROJECT_DIR / "src" / "lichess_pipeline").is_dir():
+        sys.path.insert(0, str(PROJECT_DIR / "src"))
+
+    DATA_DIR = Path(
+        os.environ.get("LICHESS_DATA_DIR", PROJECT_DIR / "data")
+    ).expanduser()
+    PROCESSED_DIR = Path(
+        os.environ.get("LICHESS_PROCESSED_DIR", DATA_DIR / "processed")
+    ).expanduser()
+    MODELS_DIR = Path(
+        os.environ.get("LICHESS_MODELS_DIR", DATA_DIR / "models")
+    ).expanduser()
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     import chess
     import chess.svg
@@ -43,11 +72,6 @@ def _():
         load_clean_evals_df,
         parse_pgn_sample_df,
     )
-
-    PROJECT_DIR = Path(__file__).resolve().parents[1]
-    PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
-    MODELS_DIR = PROJECT_DIR / "data" / "models"
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     POSITIONS_PATH = PROCESSED_DIR / "positions_games_sample.parquet"
     EVALS_PATH = PROCESSED_DIR / "evals_clean_sample.parquet"

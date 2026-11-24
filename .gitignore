@@ -34,11 +34,10 @@ __marimo__/
 
 # Local datasets and downloaded cache
 /data/*
-# Trained checkpoints and cleaned samples are tracked with Git LFS (see
-# .gitattributes); the bundled Hugging Face cache is re-downloadable and the
-# raw archives stay out of Git.
+# Trained checkpoints are tracked with Git LFS (see .gitattributes). The raw
+# archives, the cleaned Parquet samples and the bundled Hugging Face cache stay
+# out of Git: notebook 01 regenerates the samples on demand.
 !/data/models/
-!/data/processed/
 /data/models/maia3/
 
 # Local environment variables and secrets

@@ -6,9 +6,41 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
+    import sys
     from datetime import datetime
     from functools import lru_cache
     from pathlib import Path
+
+    def _project_dir() -> Path:
+        """Find the repository when run from a checkout or a Colab session."""
+        if "__file__" in globals():
+            return Path(__file__).resolve().parents[1]
+        override = os.environ.get("LICHESS_PROJECT_DIR")
+        if override:
+            return Path(override).expanduser().resolve()
+        for candidate in (Path.cwd(), Path("/content/lichess-chess-games-big-data")):
+            if (candidate / "src" / "lichess_pipeline").is_dir():
+                return candidate
+        return Path.cwd()
+
+    PROJECT_DIR = _project_dir()
+    if (PROJECT_DIR / "src" / "lichess_pipeline").is_dir():
+        sys.path.insert(0, str(PROJECT_DIR / "src"))
+
+    DATA_DIR = Path(
+        os.environ.get("LICHESS_DATA_DIR", PROJECT_DIR / "data")
+    ).expanduser()
+    MODELS_DIR = Path(
+        os.environ.get("LICHESS_MODELS_DIR", DATA_DIR / "models")
+    ).expanduser()
+    POSITIONS_PATH = Path(
+        os.environ.get(
+            "LICHESS_POSITIONS_PATH",
+            Path(os.environ.get("LICHESS_PROCESSED_DIR", DATA_DIR / "processed"))
+            / "positions_games_sample.parquet",
+        )
+    ).expanduser()
 
     import chess
     import chess.svg
@@ -20,12 +52,6 @@ def _():
         load_policy_checkpoint,
     )
     from lichess_pipeline.model.scratch_net import predict_top_moves
-
-    PROJECT_DIR = Path(__file__).resolve().parents[1]
-    MODELS_DIR = PROJECT_DIR / "data" / "models"
-    POSITIONS_PATH = (
-        PROJECT_DIR / "data" / "processed" / "positions_games_sample.parquet"
-    )
     load_cached = lru_cache(maxsize=None)(load_policy_checkpoint)
     return (
         MODELS_DIR,

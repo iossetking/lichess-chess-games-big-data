@@ -6,7 +6,35 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
+    import sys
     from pathlib import Path
+
+    def _project_dir() -> Path:
+        """Find the repository when run from a checkout or a Colab session."""
+        if "__file__" in globals():
+            return Path(__file__).resolve().parents[1]
+        override = os.environ.get("LICHESS_PROJECT_DIR")
+        if override:
+            return Path(override).expanduser().resolve()
+        for candidate in (Path.cwd(), Path("/content/lichess-chess-games-big-data")):
+            if (candidate / "src" / "lichess_pipeline").is_dir():
+                return candidate
+        return Path.cwd()
+
+    PROJECT_DIR = _project_dir()
+    if (PROJECT_DIR / "src" / "lichess_pipeline").is_dir():
+        sys.path.insert(0, str(PROJECT_DIR / "src"))
+
+    DATA_DIR = Path(
+        os.environ.get("LICHESS_DATA_DIR", PROJECT_DIR / "data")
+    ).expanduser()
+    PROCESSED_DIR = Path(
+        os.environ.get("LICHESS_PROCESSED_DIR", DATA_DIR / "processed")
+    ).expanduser()
+    RAW_DIR = Path(os.environ.get("LICHESS_RAW_DIR", DATA_DIR / "raw")).expanduser()
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     import marimo as mo
     import matplotlib.pyplot as plt
@@ -28,13 +56,6 @@ def _():
         load_clean_evals_df,
         parse_pgn_sample_df,
     )
-
-    PROJECT_DIR = Path(__file__).resolve().parents[1]
-    DATA_DIR = PROJECT_DIR / "data"
-    PROCESSED_DIR = DATA_DIR / "processed"
-    RAW_DIR = DATA_DIR / "raw"
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     plt.rcParams.update(
         {

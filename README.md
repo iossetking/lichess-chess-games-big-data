@@ -13,24 +13,26 @@ La unión de ambos es: foto del tablero → FEN → jugada sugerida.
 
 ```bash
 uv sync
-git lfs pull   # descarga checkpoints y muestras versionados con Git LFS
+git lfs pull   # descarga los checkpoints de data/models/
 ```
 
-Los checkpoints se guardan a media precisión (`float16`) para ocupar la mitad y
-se versionan con Git LFS (ver `.gitattributes`); `git lfs pull` los descarga
-tras clonar. Los pesos de visión de YOLO (`chess-pieces*.pt`,
-`chess-piece-classifier.pt`) pueden venir en el repositorio, y si faltan se
+Los checkpoints se guardan a media precisión (`float16`) cuando aplica y se
+versionan con Git LFS (ver `.gitattributes`); `git lfs pull` los descarga tras
+clonar. Las muestras limpias de `data/processed/` **no** se versionan: las
+genera el cuaderno 01 y se quedan en el equipo donde se ejecuta (o en la sesión
+de Colab). Los pesos de visión de YOLO (`chess-pieces*.pt`,
+`chess-piece-classifier.pt`) pueden venir en el repositorio; si faltan, se
 generan con los entrenadores de `scripts/` (ver la sección de visión).
 
-## Dos rutas de trabajo
+## Tres rutas de trabajo
 
-El repositorio se puede usar sin entrenar nada o reconstruyendo todo desde los
-datos oficiales de Lichess. Elige una:
+El repositorio se puede usar sin entrenar nada, reconstruyendo todo desde los
+datos oficiales de Lichess o entrenando en una GPU de Colab. Elige una:
 
 ### Ruta A · Usar los modelos ya guardados (rápida)
 
-Los cinco modelos de jugadas, las muestras limpias y, si están publicados, los
-pesos de visión se descargan con Git LFS:
+Los cinco modelos de jugadas y, si están publicados, los pesos de visión se
+descargan con Git LFS:
 
 ```bash
 uv sync
@@ -41,7 +43,7 @@ ls data/models/approach1_scratch.pt data/models/approach1_weight_ftuning.pt \
 ```
 
 Con eso funcionan directamente (si algún checkpoint todavía no está publicado en
-el repositorio, genéralo con la ruta B):
+el repositorio, genéralo con la ruta B o C):
 
 - **Comparar modelos**: `uv run marimo edit notebooks/04_model_playground.py`
   (no entrena; solo carga los `.pt` que existan en `data/models/`).
@@ -50,44 +52,167 @@ el repositorio, genéralo con la ruta B):
   entrénalo con la ruta B).
 
 No hace falta ejecutar los cuadernos 01–03 ni descargar los archivos de Lichess.
+Las muestras de `data/processed/` solo son necesarias para reentrenar o para
+explorar los datos en el cuaderno 01.
 
-### Ruta B · Entrenar desde cero
+### Ruta B · Entrenar desde cero en local
 
 Se parte de la muestra oficial de Lichess y se generan todas las salidas
-(`data/processed/*.parquet` y `data/models/*.pt`):
+(`data/processed/*.parquet` y `data/models/*.pt`). Los cuadernos se ejecutan sin
+interfaz y leen sus parámetros de variables de entorno, así que el tamaño y las
+épocas van en el mismo comando. Ajusta los valores a tu equipo:
 
 1. **Muestra limpia** (streaming desde `database.lichess.org`):
    ```bash
+   LICHESS_YEAR_FROM=2024 LICHESS_YEAR_TO=2025 LICHESS_MAX_GAMES=20000 \
+   LICHESS_MAX_POSITIONS=500000 LICHESS_MAX_EVALS=500000 \
    uv run python notebooks/01_eda_and_cleaning.py
    ```
+   Salidas en `data/processed/`: `games_clean_sample.parquet`,
+   `positions_games_sample.parquet` y `evals_clean_sample.parquet`.
 2. **Tres modelos de jugadas** (red desde cero + dos ajustes con Stockfish):
    ```bash
+   LICHESS_MAX_HUMAN=500000 LICHESS_MAX_EVAL=500000 \
+   LICHESS_EPOCHS_STAGE1=8 LICHESS_EPOCHS_STAGE2=5 LICHESS_EPOCHS_LORA=5 \
+   LICHESS_LORA_RANK=8 LICHESS_N_FOLDS=5 \
    uv run python notebooks/02_model_scratch_and_finetune.py
    ```
 3. **Dos adaptadores Maia-3 + LoRA** (GPU recomendada; en CPU tarda más de una
    hora):
    ```bash
+   LICHESS_MAIA_MODEL=maia3-5m LICHESS_MAIA_MAX_TRAIN=500000 \
+   LICHESS_MAIA_EPOCHS=5 LICHESS_MAIA_RANK=8 LICHESS_MAIA_LR=2e-4 \
    uv run python notebooks/03_maia.py
    ```
 4. **Detector de piezas YOLO** para la visión (o reutiliza el que ya esté en
    `data/models/chess-pieces.pt`):
    ```bash
-   uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
+   uv run python scripts/train_chess_piece_yolo.py \
+     --epochs 50 --device mps --imgsz 640 --batch 16
    ```
 
-Los cuadernos sin interfaz leen tamaños y épocas de variables de entorno (ver
-[Entrenar en Colab](#entrenar-en-colab)), así que la misma ruta sirve para una
-prueba local de segundos o para una corrida grande en Colab. Al terminar,
+Los cuadernos 2 y 3 reutilizan los Parquet de `data/processed/` y, si faltan,
+generan su propia muestra. La misma ruta sirve para una prueba local de segundos
+(baja las variables) o para una corrida grande con GPU. Al terminar,
 `data/models/` contiene los cinco modelos y puedes seguir la ruta A para
 compararlos y probarlos en vivo.
+
+### Ruta C · Entrenar en Google Colab con `colab-cli`
+
+La sesión de Colab tiene su propio disco. Los Parquet que genera el cuaderno 01
+se quedan en `/content/lichess-chess-games-big-data/data/processed` **dentro de
+la sesión**, y los cuadernos 02 y 03 los leen desde ahí, sin copiarlos al
+portátil. Los modelos entrenados se escriben en
+`/content/lichess-chess-games-big-data/data/models` y al final se descargan a
+`data/models/` del portátil.
+
+1. **Instala el CLI con `uv`** (una sola vez):
+   ```bash
+   uv tool install google-colab-cli
+   ```
+2. **Crea una sesión con GPU** (T4, L4, A100…):
+   ```bash
+   colab new -s chess --gpu T4
+   ```
+3. **Clona el repositorio y prepara las dependencias en la sesión**:
+   ```bash
+   colab exec -s chess --timeout 0 <<'PY'
+   !git clone --depth 1 -b develop https://github.com/iossetking/lichess-chess-games-big-data.git /content/lichess-chess-games-big-data
+   !pip install -q marimo polars matplotlib zstandard datasets "git+https://github.com/CSSLab/maia3.git"
+   PY
+   ```
+   `torch` y el resto de la base ya vienen en Colab. Los cuadernos añaden
+   `src/` del clon a `sys.path`, así que no hace falta instalar el paquete. Si
+   clonas en otra ruta, pásala con `--env
+   LICHESS_PROJECT_DIR=/content/otra/ruta`.
+4. **Ejecuta los tres cuadernos en la misma sesión**, un comando por cuaderno.
+   El primero descarga y limpia los datos; los otros dos entrenan con esos
+   Parquet de la sesión:
+   ```bash
+   # 01 · datos limpios (se quedan en la sesión)
+   colab exec -s chess -f notebooks/01_eda_and_cleaning.py --timeout 0 \
+     --env LICHESS_YEAR_FROM=2024 --env LICHESS_YEAR_TO=2025 \
+     --env LICHESS_MAX_GAMES=20000 --env LICHESS_MAX_POSITIONS=2000000 \
+     --env LICHESS_MAX_EVALS=2000000
+
+   # 02 · tres modelos de jugadas
+   colab exec -s chess -f notebooks/02_model_scratch_and_finetune.py --timeout 0 \
+     --env LICHESS_MAX_HUMAN=2000000 --env LICHESS_MAX_EVAL=2000000 \
+     --env LICHESS_EPOCHS_STAGE1=8 --env LICHESS_EPOCHS_STAGE2=5 \
+     --env LICHESS_EPOCHS_LORA=5 --env LICHESS_N_FOLDS=5
+
+   # 03 · dos adaptadores Maia-3 + LoRA
+   colab exec -s chess -f notebooks/03_maia.py --timeout 0 \
+     --env LICHESS_MAIA_MODEL=maia3-23m --env LICHESS_MAIA_MAX_TRAIN=2000000 \
+     --env LICHESS_MAIA_EPOCHS=5
+   ```
+5. **Descarga los modelos a `data/models/`** del portátil:
+   ```bash
+   mkdir -p data/models
+   for model in approach1_scratch approach1_weight_ftuning \
+                approach1_lora_ftuning maia3_lora_human maia3_lora_stockfish; do
+     colab download -s chess \
+       "/content/lichess-chess-games-big-data/data/models/${model}.pt" \
+       "data/models/${model}.pt"
+   done
+   ```
+6. **Opcional · guarda también los Parquet limpios en `data/processed/`** del
+   portátil (o usa `--env LICHESS_PROCESSED_DIR=...` para escribirlos en una
+   carpeta persistente, por ejemplo la de Google Drive):
+   ```bash
+   mkdir -p data/processed
+   for name in games_clean_sample positions_games_sample evals_clean_sample; do
+     colab download -s chess \
+       "/content/lichess-chess-games-big-data/data/processed/${name}.parquet" \
+       "data/processed/${name}.parquet"
+   done
+   ```
+7. **Cierra la sesión** para dejar de consumir cómputo:
+   ```bash
+   colab stop -s chess
+   ```
+
+Los comandos `colab exec` usan el archivo local del cuaderno (con tus cambios),
+mientras que `src/` y el paquete Maia-3 salen del clon de la sesión. Haz
+`git push` antes de lanzar una corrida para que ambos coincidan. Para ver el
+estado o cerrar todas las sesiones: `colab status -s chess`, `colab stop --all`.
+
+## Variables de entorno de los cuadernos
+
+Sin interfaz, los cuadernos leen tamaños, épocas y rutas de estas variables.
+Todas son opcionales y tienen un valor por defecto pensado para una prueba
+rápida:
+
+| Cuaderno | Variables |
+|---|---|
+| `01_eda_and_cleaning.py` | `LICHESS_YEAR_FROM`, `LICHESS_YEAR_TO`, `LICHESS_MONTH_FROM`, `LICHESS_MONTH_TO`, `LICHESS_MAX_GAMES`, `LICHESS_MIN_ELO`, `LICHESS_MAX_POSITIONS`, `LICHESS_MAX_EVALS`, `LICHESS_MIN_DEPTH` |
+| `02_model_scratch_and_finetune.py` | `LICHESS_MAX_HUMAN`, `LICHESS_MAX_EVAL`, `LICHESS_EPOCHS_STAGE1`, `LICHESS_EPOCHS_STAGE2`, `LICHESS_EPOCHS_LORA`, `LICHESS_LORA_RANK`, `LICHESS_N_FOLDS`, `LICHESS_CV_WEIGHT`, `LICHESS_CV_LORA` |
+| `03_maia.py` | `LICHESS_MAIA_MODEL`, `LICHESS_MAIA_MAX_TRAIN`, `LICHESS_MAIA_EPOCHS`, `LICHESS_MAIA_RANK`, `LICHESS_MAIA_LR`, `LICHESS_MAIA_ELO` |
+| Todos | `LICHESS_PROJECT_DIR`, `LICHESS_DATA_DIR`, `LICHESS_PROCESSED_DIR`, `LICHESS_MODELS_DIR` |
+
+`LICHESS_PROJECT_DIR` solo hace falta si ejecutas el cuaderno fuera del
+repositorio (por ejemplo en Colab con otro nombre de carpeta).
+`LICHESS_DATA_DIR` cambia la raíz de datos; `LICHESS_PROCESSED_DIR` y
+`LICHESS_MODELS_DIR` cambian solo una de las dos carpetas. Por defecto son
+`<repo>/data/processed` y `<repo>/data/models`, o `./data/...` cuando no hay
+repositorio (Colab).
+
+Ejemplo de prueba local mínima (segundos):
+
+```bash
+LICHESS_MAX_HUMAN=2000 LICHESS_MAX_EVAL=2000 LICHESS_EPOCHS_STAGE1=1 \
+LICHESS_EPOCHS_STAGE2=1 LICHESS_EPOCHS_LORA=1 LICHESS_N_FOLDS=3 \
+LICHESS_CV_WEIGHT=0 LICHESS_CV_LORA=0 \
+uv run python notebooks/02_model_scratch_and_finetune.py
+```
 
 ## Cuadernos de datos y predicción (entrega parcial)
 
 Todo se lee directamente de `database.lichess.org`; no se necesita descargar un
 mes completo. Cada cuaderno cierra el flujo HTTP en cuanto reúne la muestra
-pedida y guarda sus resultados en `data/processed/` y `data/models/`, ambos
-versionados con Git LFS (las muestras limpias y los checkpoints son pequeños;
-los archivos crudos siguen fuera de Git).
+pedida. El cuaderno 01 escribe `data/processed/*.parquet` (local, fuera de Git)
+y los cuadernos 02 y 03 escriben los checkpoints en `data/models/` (versionados
+con Git LFS).
 
 | Cuaderno | Contenido | Salidas |
 |---|---|---|
@@ -96,8 +221,9 @@ los archivos crudos siguen fuera de Git).
 | `notebooks/03_maia.py` | **Enfoque 3**: Maia-3 preentrenado ajustado con LoRA; un modelo con jugadas humanas y otro con jugadas de Stockfish | `maia3_lora_human.pt`, `maia3_lora_stockfish.pt` |
 | `notebooks/04_model_playground.py` | **Prueba visual**: detecta todos los `.pt`/`.pth` bajo `data/models/` (incluidas subcarpetas) y compara las jugadas de los checkpoints elegidos en un FEN o en una partida guardada; no entrena | — |
 
-La **ruta A** se salta este bloque: los Parquet y los `.pt` ya vienen en Git
-LFS. La **ruta B** ejecuta los cuadernos en orden:
+La **ruta A** se salta este bloque: los `.pt` ya vienen en Git LFS y los Parquet
+solo hacen falta para reentrenar. La **ruta B** ejecuta los cuadernos en orden;
+también se pueden abrir con interfaz:
 
 ```bash
 uv run marimo edit notebooks/01_eda_and_cleaning.py
@@ -122,9 +248,9 @@ porque al cargar los tensores vuelven a `float32`.
 - `data/models/` se versiona con **Git LFS**; `git lfs pull` descarga los pesos
   y un `.pt` sin descargar se detecta con un mensaje claro en vez de un error de
   deserialización.
-- `data/processed/*.parquet` también se versiona con **Git LFS**: las muestras
-  limpias ocupan pocos MB (67 mil posiciones ≈ 3 MB) y así el cuaderno 2 o 3
-  arrancan en Colab sin volver a descargar nada.
+- `data/processed/` es local y está ignorado por Git: el cuaderno 01 lo
+  regenera desde Lichess. En Colab se queda en el disco de la sesión y se puede
+  descargar con `colab download` (ruta C).
 - La validación cruzada ya no escribe los pesos de cada partición en
   `data/models/cv/`: se conservan en memoria mientras dura el cuaderno, así que
   no deja cientos de megabytes de checkpoints temporales.
@@ -180,16 +306,15 @@ Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
   pesos puede deshacer parte de lo aprendido con una muestra pequeña, así que
   también se ofrece **LoRA**: la red se congela y solo se entrena una corrección
   de bajo rango sobre el tronco residual y las proyecciones de la cabeza de
-  jugadas, conservando
-  la época con la menor pérdida de validación. El cuaderno compara los tres
-  modelos y guarda cada uno por separado (`approach1_scratch.pt`,
-  `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt`). El adaptador LoRA
-  se fusiona antes de guardar, así que ese archivo se carga como un
-  `ChessPolicyNet` normal.
+  jugadas, conservando la época con la menor pérdida de validación. El cuaderno
+  compara los tres modelos y guarda cada uno por separado
+  (`approach1_scratch.pt`, `approach1_weight_ftuning.pt`,
+  `approach1_lora_ftuning.pt`). El adaptador LoRA se fusiona antes de guardar,
+  así que ese archivo se carga como un `ChessPolicyNet` normal.
 - **Optimización**: `train_model` usa Adam con decaimiento coseno de la tasa de
   aprendizaje y restaura la época con la menor pérdida de validación, lo que
   afina las probabilidades. El dispositivo se elige solo: CUDA, luego MPS y si
-  no, CPU (ver [Entrenar en Colab](#entrenar-en-colab)).
+  no, CPU.
 - **Compatibilidad**: los checkpoints antiguos (`_v1`, `_v2`, 13 planos y cabeza
   plana) se detectan y cargan automáticamente, así que se pueden comparar con
   los nuevos en el cuaderno 4 y en la vista en vivo.
@@ -200,43 +325,7 @@ Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
   los resultados de la cruzada se eligen los ajustes, se reajustan los tres
   modelos con todo el desarrollo y se evalúan una sola vez en la prueba.
 
-### Entrenar en Colab
-
-Los cuadernos se pueden ejecutar sin interfaz (`uv run python notebooks/…`) y
-leen sus controles de variables de entorno, para hacer una prueba rápida local
-y lanzar el entrenamiento pesado en una GPU de Colab con `colab-cli`:
-
-| Cuaderno | Variables |
-|---|---|
-| `01_eda_and_cleaning.py` | `LICHESS_YEAR_FROM`, `LICHESS_YEAR_TO`, `LICHESS_MONTH_FROM`, `LICHESS_MONTH_TO`, `LICHESS_MAX_GAMES`, `LICHESS_MIN_ELO`, `LICHESS_MAX_POSITIONS`, `LICHESS_MAX_EVALS`, `LICHESS_MIN_DEPTH` |
-| `02_model_scratch_and_finetune.py` | `LICHESS_MAX_HUMAN`, `LICHESS_MAX_EVAL`, `LICHESS_EPOCHS_STAGE1`, `LICHESS_EPOCHS_STAGE2`, `LICHESS_EPOCHS_LORA`, `LICHESS_LORA_RANK`, `LICHESS_N_FOLDS`, `LICHESS_CV_WEIGHT`, `LICHESS_CV_LORA` |
-| `03_maia.py` | `LICHESS_MAIA_MODEL`, `LICHESS_MAIA_MAX_TRAIN`, `LICHESS_MAIA_EPOCHS`, `LICHESS_MAIA_RANK`, `LICHESS_MAIA_LR`, `LICHESS_MAIA_ELO` |
-
-Sin interfaz, el cuaderno 1 descarga los archivos oficiales **en streaming**
-(cierra el HTTP en cuanto reúne la muestra) y escribe los Parquet; los
-cuadernos 2 y 3 reutilizan esos Parquet y, si faltan, generan su propia muestra.
-Ejemplo de muestra grande en Colab:
-
-```bash
-LICHESS_YEAR_FROM=2024 LICHESS_YEAR_TO=2025 LICHESS_MAX_GAMES=20000 \
-LICHESS_MAX_POSITIONS=500000 LICHESS_MAX_EVALS=500000 \
-uv run python notebooks/01_eda_and_cleaning.py
-```
-
-Ejemplo de prueba local mínima (segundos):
-
-```bash
-LICHESS_MAX_HUMAN=2000 LICHESS_MAX_EVAL=2000 LICHESS_EPOCHS_STAGE1=1 \
-LICHESS_EPOCHS_STAGE2=1 LICHESS_EPOCHS_LORA=1 LICHESS_N_FOLDS=3 \
-LICHESS_CV_WEIGHT=0 LICHESS_CV_LORA=0 \
-uv run python notebooks/02_model_scratch_and_finetune.py
-```
-
-En Colab, sube los límites (por ejemplo `LICHESS_MAX_HUMAN=200000`) y descarga
-los `.pt` resultantes a `data/models/`; el cargador los reconoce sin cambios.
-Maia-3 es un transformer de 64 casillas y ocho posiciones de historia: en CPU
-tarda más de una hora, así que conviene entrenarlo siempre con GPU.
-
+### Límites de escala
 
 Para el servidor final no basta con subir los números: el pipeline actual
 materializa las muestras en memoria (listas de Python y DataFrames completos,
@@ -268,7 +357,8 @@ El lector necesita un checkpoint YOLO con las 12 clases coloreadas.
   CC BY 4.0, exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
   mejor checkpoint a `data/models/chess-pieces.pt`:
   ```bash
-  uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
+  uv run python scripts/train_chess_piece_yolo.py \
+    --epochs 50 --device mps --imgsz 640 --batch 16
   ```
 
 Para uso confiable, añade al ajuste fotos de tu cámara, piezas e iluminación.
@@ -339,8 +429,8 @@ guarda sus esquinas. Pulsa `r` para recalibrar al mover cámara o tablero;
 `--imgsz 416` reduce el tiempo de inferencia con posible pérdida de detalle.
 
 Con los modelos de jugadas en `data/models/` (ruta A ya incluida, o salida de
-la ruta B), la vista en vivo los carga sin argumentos extra y dibuja una flecha
-por modelo sobre el tablero real:
+la ruta B o C), la vista en vivo los carga sin argumentos extra y dibuja una
+flecha por modelo sobre el tablero real:
 
 ```bash
 uv run python scripts/live_chess_fen.py \

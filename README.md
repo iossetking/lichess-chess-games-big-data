@@ -131,10 +131,10 @@ portátil. Los modelos entrenados se escriben en
    ```bash
    # 01 · datos limpios (se quedan en la sesión)
    colab exec -s chess -f notebooks/01_eda_and_cleaning.py --timeout 0 \
-  --env LICHESS_YEAR_FROM=2024 --env LICHESS_YEAR_TO=2025 \
-  --env LICHESS_MONTH_FROM=1 --env LICHESS_MONTH_TO=12 \
-  --env LICHESS_MAX_GAMES=20000 --env LICHESS_MAX_POSITIONS=2000000 \
-  --env LICHESS_MAX_EVALS=2000000
+     --env LICHESS_YEAR_FROM=2024 --env LICHESS_YEAR_TO=2025 \
+     --env LICHESS_MONTH_FROM=1 --env LICHESS_MONTH_TO=12 \
+     --env LICHESS_MAX_GAMES=20000 --env LICHESS_MAX_POSITIONS=2000000 \
+     --env LICHESS_MAX_EVALS=2000000
 
    # 02 · tres modelos de jugadas
    colab exec -s chess -f notebooks/02_model_scratch_and_finetune.py --timeout 0 \

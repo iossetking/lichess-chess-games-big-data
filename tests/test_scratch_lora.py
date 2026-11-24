@@ -24,6 +24,7 @@ from lichess_pipeline.model.scratch_lora import (
 from lichess_pipeline.model.scratch_net import (
     ChessPolicyNet,
     make_tensor_dataset,
+    pick_device,
     predict_top_moves,
 )
 
@@ -120,18 +121,18 @@ def test_train_head_lora_moves_the_adapters_and_never_the_base():
     train_head_lora(model, dataset, dataset, epochs=2, lr=1e-2, batch_size=4)
 
     # The frozen Stage 1 weights survive; merging is what writes the update back.
-    assert torch.allclose(base_convs, model.base.blocks[0].conv1.base.weight)
-    assert torch.allclose(base_head, model.base.head.proj_from.base.weight)
-    assert torch.allclose(base_bias, model.base.head.spatial_bias.base)
+    assert torch.allclose(base_convs, model.base.blocks[0].conv1.base.weight.cpu())
+    assert torch.allclose(base_head, model.base.head.proj_from.base.weight.cpu())
+    assert torch.allclose(base_bias, model.base.head.spatial_bias.base.cpu())
     assert not model.base.blocks[0].conv1.base.weight.requires_grad
-    assert not torch.allclose(adapter_before, model.base.blocks[0].conv1.lora_b)
+    assert not torch.allclose(adapter_before, model.base.blocks[0].conv1.lora_b.cpu())
     assert not torch.allclose(
         torch.zeros_like(model.base.head.spatial_bias.lora_b),
         model.base.head.spatial_bias.lora_b,
     )
     # BatchNorm statistics must not drift either: the base stays in eval mode.
     for name, buffer in model.base.named_buffers():
-        assert torch.equal(buffers_before[name], buffer)
+        assert torch.equal(buffers_before[name], buffer.cpu())
 
 
 def test_train_head_lora_can_skip_best_epoch_selection():
@@ -157,7 +158,8 @@ def test_merged_model_reproduces_the_adapter_network():
     train_head_lora(model, dataset, dataset, epochs=2, lr=1e-2, batch_size=4)
 
     merged = merge_head_lora(model)
-    features = torch.rand(5, 18, 8, 8)
+    device = next(model.parameters()).device
+    features = torch.rand(5, 18, 8, 8, device=device)
     with torch.no_grad():
         expected = model(features)
         actual = merged(features)
@@ -201,3 +203,16 @@ def test_adapters_use_the_requested_rank_on_convs_and_projections():
     assert convolution.lora_b.shape == (TINY_CHANNELS, 16)
     assert projection.lora_a.shape == (16, TINY_CHANNELS)
     assert model.base.head.spatial_bias.lora_a.shape == (16, 64)
+
+
+def test_train_head_lora_moves_cpu_model_to_selected_device():
+    model = apply_head_lora(tiny_model(), rank=4, alpha=8.0)
+    dataset = tiny_dataset()
+
+    train_head_lora(model, dataset, dataset, epochs=1, lr=1e-2, batch_size=4)
+    assert next(model.parameters()).device.type == pick_device().type
+
+    train_head_lora(
+        model, dataset, dataset, epochs=1, lr=1e-2, batch_size=4, device="cpu"
+    )
+    assert next(model.parameters()).device.type == "cpu"

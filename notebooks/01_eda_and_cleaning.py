@@ -12,12 +12,14 @@ def _():
 
     def _project_dir() -> Path:
         """Find the repository when run from a checkout or a Colab session."""
-        if "__file__" in globals():
-            return Path(__file__).resolve().parents[1]
         override = os.environ.get("LICHESS_PROJECT_DIR")
         if override:
             return Path(override).expanduser().resolve()
-        for candidate in (Path.cwd(), Path("/content/lichess-chess-games-big-data")):
+        candidates: list[Path] = []
+        if "__file__" in globals():
+            candidates.append(Path(__file__).resolve().parents[1])
+        candidates.extend([Path.cwd(), Path("/content/lichess-chess-games-big-data")])
+        for candidate in candidates:
             if (candidate / "src" / "lichess_pipeline").is_dir():
                 return candidate
         return Path.cwd()

@@ -32,7 +32,7 @@ from torch import nn
 from torch.nn import functional
 from torch.utils.data import DataLoader, TensorDataset
 
-from lichess_pipeline.model.scratch_net import ChessPolicyNet
+from lichess_pipeline.model.scratch_net import ChessPolicyNet, pick_device
 
 DEFAULT_RANK = 8
 DEFAULT_ALPHA = 16.0
@@ -289,6 +289,7 @@ def train_head_lora(
     seed: int = 42,
     weight_decay: float = DEFAULT_WEIGHT_DECAY,
     keep_best: bool = True,
+    device: str | torch.device | None = None,
 ) -> list[dict[str, float]]:
     """Train only the adapters, optionally keeping the best validation epoch.
 
@@ -303,13 +304,14 @@ def train_head_lora(
         raise ValueError("Train and validation datasets must not be empty")
     if not isinstance(model, LoRAPolicyNet):
         raise TypeError("Expected a LoRAPolicyNet: call apply_head_lora first")
+    target_device = pick_device(device)
+    model.to(target_device)
     trainable = [
         parameter for parameter in model.parameters() if parameter.requires_grad
     ]
     if not trainable:
         raise ValueError("Nothing to train: call apply_head_lora first")
 
-    device = trainable[0].device
     torch.manual_seed(seed)
     optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss()
@@ -323,7 +325,7 @@ def train_head_lora(
     history: list[dict[str, float]] = []
 
     best_loss = (
-        _validation_metrics(model, val_loader, criterion, device)["loss"]
+        _validation_metrics(model, val_loader, criterion, target_device)["loss"]
         if keep_best
         else math.inf
     )
@@ -336,9 +338,9 @@ def train_head_lora(
         seen = 0
         for features, targets, masks in train_loader:
             features, targets, masks = (
-                features.to(device),
-                targets.to(device),
-                masks.to(device),
+                features.to(target_device),
+                targets.to(target_device),
+                masks.to(target_device),
             )
             optimizer.zero_grad(set_to_none=True)
             logits = _masked_logits(model, features, masks)
@@ -347,7 +349,7 @@ def train_head_lora(
             optimizer.step()
             running_loss += loss.item() * targets.size(0)
             seen += targets.size(0)
-        metrics = _validation_metrics(model, val_loader, criterion, device)
+        metrics = _validation_metrics(model, val_loader, criterion, target_device)
         history.append(
             {
                 "epoch": float(epoch),

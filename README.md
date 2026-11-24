@@ -117,7 +117,7 @@ portátil. Los modelos entrenados se escriben en
 3. **Clona el repositorio y prepara las dependencias en la sesión**:
    ```bash
    colab exec -s chess --timeout 0 <<'PY'
-   !git clone --depth 1 -b develop https://github.com/iossetking/lichess-chess-games-big-data.git /content/lichess-chess-games-big-data
+   !GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 -b develop https://github.com/iossetking/lichess-chess-games-big-data.git /content/lichess-chess-games-big-data
    !pip install -q marimo polars matplotlib zstandard datasets "git+https://github.com/CSSLab/maia3.git"
    PY
    ```

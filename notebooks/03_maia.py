@@ -196,30 +196,71 @@ def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
 
 @app.cell
 def _(mo):
+    import os
+
+    def _env_int(name: str, fallback: int) -> int:
+        try:
+            return int(os.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
+    def _env_float(name: str, fallback: float) -> float:
+        try:
+            return float(os.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
+    def _clamp(value: int, low: int, high: int) -> int:
+        return max(low, min(high, value))
+
+    _models = {"Maia-3 5M (rápido)": "maia3-5m", "Maia-3 23M": "maia3-23m"}
+    _env_model = os.environ.get("LICHESS_MAIA_MODEL", "maia3-5m")
+    _base_label = next(
+        (label for label, name in _models.items() if name == _env_model),
+        "Maia-3 5M (rápido)",
+    )
     base_name = mo.ui.dropdown(
-        options={"Maia-3 5M (rápido)": "maia3-5m", "Maia-3 23M": "maia3-23m"},
-        value="Maia-3 5M (rápido)",
+        options=_models,
+        value=_base_label,
         label="Modelo base",
     )
     max_train = mo.ui.slider(
         start=2000,
         stop=200000,
         step=2000,
-        value=20000,
+        value=_clamp(_env_int("LICHESS_MAIA_MAX_TRAIN", 20000), 2000, 200000),
         label="Posiciones máximas por dataset",
     )
-    epochs = mo.ui.slider(start=1, stop=10, step=1, value=5, label="Épocas")
-    rank = mo.ui.dropdown(options=[2, 4, 8, 16, 32], value=8, label="Rango LoRA")
+    epochs = mo.ui.slider(
+        start=1,
+        stop=10,
+        step=1,
+        value=_clamp(_env_int("LICHESS_MAIA_EPOCHS", 5), 1, 10),
+        label="Épocas",
+    )
+    _rank_options = [2, 4, 8, 16, 32]
+    rank = mo.ui.dropdown(
+        options=_rank_options,
+        value=(
+            _env_int("LICHESS_MAIA_RANK", 8)
+            if _env_int("LICHESS_MAIA_RANK", 8) in _rank_options
+            else 8
+        ),
+        label="Rango LoRA",
+    )
+    _rates = {"1e-4": 1e-4, "2e-4": 2e-4, "5e-4": 5e-4, "1e-3": 1e-3}
+    _env_rate = _env_float("LICHESS_MAIA_LR", 2e-4)
+    _rate_label = min(_rates, key=lambda key: abs(_rates[key] - _env_rate))
     learning_rate = mo.ui.dropdown(
-        options={"1e-4": 1e-4, "2e-4": 2e-4, "5e-4": 5e-4, "1e-3": 1e-3},
-        value="2e-4",
+        options=_rates,
+        value=_rate_label,
         label="Tasa de aprendizaje",
     )
     stockfish_elo = mo.ui.slider(
         start=1500,
         stop=3000,
         step=100,
-        value=2500,
+        value=_clamp(_env_int("LICHESS_MAIA_ELO", 2500), 1500, 3000),
         label="Elo que se le indica a Maia para las posiciones de Stockfish",
     )
     train_button = mo.ui.run_button(label="Entrenar los dos modelos")

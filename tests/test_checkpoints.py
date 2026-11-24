@@ -5,13 +5,22 @@ import torch
 from lichess_pipeline.model.checkpoints import (
     compact_state_dict,
     discover_policy_checkpoints,
-    infer_channels,
+    infer_policy_config,
     load_policy_checkpoint,
     save_policy_checkpoint,
 )
-from lichess_pipeline.model.scratch_net import ChessPolicyNet, predict_top_moves
+from lichess_pipeline.model.scratch_net import (
+    ChessPolicyNet,
+    LegacyChessPolicyNet,
+    predict_top_moves,
+)
 
-TINY_CHANNELS = (8, 8)
+TINY_CHANNELS = 16
+TINY_DEPTH = 1
+
+
+def tiny_model() -> ChessPolicyNet:
+    return ChessPolicyNet(channels=TINY_CHANNELS, depth=TINY_DEPTH)
 
 
 def test_discover_labels_nested_checkpoints_by_folder_and_filename(tmp_path):
@@ -58,12 +67,12 @@ def test_discover_returns_empty_mapping_for_missing_directory(tmp_path):
 
 
 def test_load_round_trips_predictions_and_switches_to_eval(tmp_path):
-    model = ChessPolicyNet()
     torch.manual_seed(0)
+    model = ChessPolicyNet().eval()
     path = tmp_path / "approach1_scratch.pt"
     torch.save(model.state_dict(), path)
 
-    loaded = load_policy_checkpoint(path)
+    loaded = load_policy_checkpoint(path, device="cpu")
 
     assert loaded.training is False
     assert predict_top_moves(loaded, chess.STARTING_FEN, top_k=3) == predict_top_moves(
@@ -103,7 +112,7 @@ def test_compact_state_dict_halves_floats_and_keeps_integer_buffers():
 
 
 def test_save_policy_checkpoint_is_smaller_than_float32_and_still_loads(tmp_path):
-    model = ChessPolicyNet(channels=TINY_CHANNELS)
+    model = tiny_model()
     half_path = save_policy_checkpoint(model, tmp_path / "nested" / "scratch.pt")
     float_path = tmp_path / "scratch-fp32.pt"
     torch.save(model.state_dict(), float_path)
@@ -111,33 +120,56 @@ def test_save_policy_checkpoint_is_smaller_than_float32_and_still_loads(tmp_path
     state = torch.load(half_path, map_location="cpu", weights_only=True)
 
     assert half_path.is_file()
-    assert state["head.weight"].dtype == torch.float16
-    assert half_path.stat().st_size < float_path.stat().st_size * 0.55
-    assert load_policy_checkpoint(half_path).training is False
+    assert state["stem.0.weight"].dtype == torch.float16
+    assert half_path.stat().st_size < float_path.stat().st_size
+    half_bytes = sum(t.numel() * t.element_size() for t in state.values())
+    float_bytes = sum(t.numel() * t.element_size() for t in model.state_dict().values())
+    assert half_bytes < float_bytes * 0.55
+    assert load_policy_checkpoint(half_path, device="cpu").training is False
 
 
 def test_saved_checkpoint_keeps_predictions_close(tmp_path):
     torch.manual_seed(0)
-    model = ChessPolicyNet(channels=TINY_CHANNELS).eval()
+    model = tiny_model().eval()
     loaded = load_policy_checkpoint(
-        save_policy_checkpoint(model, tmp_path / "scratch.pt")
+        save_policy_checkpoint(model, tmp_path / "scratch.pt"), device="cpu"
     )
-    features = torch.rand(3, 13, 8, 8)
+    features = torch.rand(3, 18, 8, 8)
 
     with torch.no_grad():
         assert torch.allclose(model(features), loaded(features), atol=1e-2)
 
 
-def test_load_rebuilds_the_trained_channel_width(tmp_path):
-    model = ChessPolicyNet(channels=(8, 12))
+def test_load_rebuilds_the_trained_width_and_depth(tmp_path):
+    model = ChessPolicyNet(channels=16, depth=2)
     path = save_policy_checkpoint(model, tmp_path / "tiny.pt")
     state = torch.load(path, map_location="cpu", weights_only=True)
 
     loaded = load_policy_checkpoint(path)
 
-    assert infer_channels(state) == (8, 12)
-    assert loaded.head.in_features == 12 * 8 * 8
+    assert infer_policy_config(state) == {
+        "kind": "spatial",
+        "channels": 16,
+        "depth": 2,
+    }
+    assert loaded.stem[0].out_channels == 16
+    assert len(loaded.blocks) == 2
     assert predict_top_moves(loaded, chess.STARTING_FEN, top_k=1)
+
+
+def test_load_rebuilds_a_legacy_checkpoint_with_its_own_encoding(tmp_path):
+    torch.manual_seed(0)
+    legacy = LegacyChessPolicyNet(channels=(8, 8)).eval()
+    path = tmp_path / "legacy_v2.pt"
+    torch.save(legacy.state_dict(), path)
+
+    loaded = load_policy_checkpoint(path)
+
+    assert isinstance(loaded, LegacyChessPolicyNet)
+    assert infer_policy_config(legacy.state_dict())["kind"] == "legacy"
+    assert predict_top_moves(loaded, chess.STARTING_FEN, top_k=3) == predict_top_moves(
+        legacy, chess.STARTING_FEN, top_k=3
+    )
 
 
 def test_load_reports_an_unpulled_git_lfs_pointer(tmp_path):
@@ -150,3 +182,18 @@ def test_load_reports_an_unpulled_git_lfs_pointer(tmp_path):
 
     with pytest.raises(RuntimeError, match="git lfs pull"):
         load_policy_checkpoint(path)
+
+
+def test_maia_adapter_payloads_are_detected_separately():
+    from lichess_pipeline.model.checkpoints import is_maia_adapter
+
+    payload = {
+        "base_model": "maia3-5m",
+        "lora_config": {"rank": 8, "targets": ["linear1"]},
+        "extra": {},
+        "state": {"blocks.0.linear1.lora_a": torch.zeros(8, 4)},
+    }
+
+    assert is_maia_adapter(payload)
+    assert not is_maia_adapter({"stem.0.weight": torch.zeros(2)})
+    assert not is_maia_adapter([1, 2, 3])

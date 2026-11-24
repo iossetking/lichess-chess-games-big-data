@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from lichess_pipeline.features import NUM_MOVE_CLASSES
+from lichess_pipeline.features import NUM_MOVE_CLASSES, NUM_PLANES
 
 DEFAULT_CHANNELS = 64
 DEFAULT_BLOCKS = 4
@@ -62,12 +62,16 @@ class ResidualBlock(nn.Module):
 class MaiaResidualPolicyNet(nn.Module):
     """Residual policy tower with the same 4096-class move head as the baseline."""
 
+    # Trained on the side-to-move canonical board, like ChessPolicyNet.
+    canonical = True
+    num_input_planes = NUM_PLANES
+
     def __init__(
         self, channels: int = DEFAULT_CHANNELS, num_blocks: int = DEFAULT_BLOCKS
     ) -> None:
         super().__init__()
         self.stem = nn.Sequential(
-            nn.Conv2d(13, channels, kernel_size=3, padding=1),
+            nn.Conv2d(NUM_PLANES, channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(channels),
             nn.ReLU(inplace=True),
         )

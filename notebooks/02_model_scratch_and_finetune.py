@@ -14,7 +14,6 @@ def _():
     import marimo as mo
     import matplotlib.pyplot as plt
     import polars as pl
-    import torch
 
     from lichess_pipeline.model.checkpoints import (
         compact_state_dict,
@@ -93,7 +92,6 @@ def _():
         predict_top_moves,
         save_policy_checkpoint,
         split_holdout,
-        torch,
         train_head_lora,
         train_model,
     )
@@ -183,6 +181,17 @@ def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
 
 @app.cell
 def _(evals_df, mo, positions_df):
+    import os
+
+    def _env_int(name: str, fallback: int) -> int:
+        try:
+            return int(os.environ[name])
+        except (KeyError, ValueError):
+            return fallback
+
+    def _clamp(value: int, low: int, high: int) -> int:
+        return max(low, min(high, value))
+
     def _step_for(total: int) -> int:
         for candidate in (100, 200, 500, 1000, 2000, 5000, 10000, 20000):
             if total / candidate <= 50:
@@ -193,38 +202,71 @@ def _(evals_df, mo, positions_df):
     _eval_total = evals_df.height
     _human_step = _step_for(_human_total)
     _eval_step = _step_for(_eval_total)
+    _human_start = min(_human_step, _human_total) or 1
+    _eval_start = min(_eval_step, _eval_total) or 1
 
     max_human_positions = mo.ui.slider(
-        start=min(_human_step, _human_total) or 1,
+        start=_human_start,
         stop=max(1, _human_total),
         step=_human_step,
-        value=min(40000, _human_total) or 1,
+        value=_clamp(
+            _env_int("LICHESS_MAX_HUMAN", min(40000, _human_total)), _human_start, max(1, _human_total)
+        ),
         label=f"Posiciones máximas etapa 1 (humanos · {_human_total:,})",
     )
     epochs_stage1 = mo.ui.slider(
-        start=1, stop=10, step=1, value=5, label="Épocas etapa 1 (humanos)"
+        start=1,
+        stop=10,
+        step=1,
+        value=_clamp(_env_int("LICHESS_EPOCHS_STAGE1", 5), 1, 10),
+        label="Épocas etapa 1 (humanos)",
     )
     max_eval_positions = mo.ui.slider(
-        start=min(_eval_step, _eval_total) or 1,
+        start=_eval_start,
         stop=max(1, _eval_total),
         step=_eval_step,
-        value=min(40000, _eval_total) or 1,
+        value=_clamp(
+            _env_int("LICHESS_MAX_EVAL", min(40000, _eval_total)), _eval_start, max(1, _eval_total)
+        ),
         label=f"Posiciones máximas etapa 2 (Stockfish · {_eval_total:,})",
     )
     epochs_stage2 = mo.ui.slider(
-        start=1, stop=10, step=1, value=5, label="Épocas ajuste de pesos (Stockfish)"
+        start=1,
+        stop=10,
+        step=1,
+        value=_clamp(_env_int("LICHESS_EPOCHS_STAGE2", 5), 1, 10),
+        label="Épocas ajuste de pesos (Stockfish)",
     )
     epochs_lora = mo.ui.slider(
-        start=1, stop=10, step=1, value=5, label="Épocas ajuste LoRA (Stockfish)"
+        start=1,
+        stop=10,
+        step=1,
+        value=_clamp(_env_int("LICHESS_EPOCHS_LORA", 5), 1, 10),
+        label="Épocas ajuste LoRA (Stockfish)",
     )
-    lora_rank = mo.ui.dropdown(options=[4, 8, 16, 32], value=8, label="Rango LoRA")
+    _rank_options = [4, 8, 16, 32]
+    lora_rank = mo.ui.dropdown(
+        options=_rank_options,
+        value=(
+            _env_int("LICHESS_LORA_RANK", 8)
+            if _env_int("LICHESS_LORA_RANK", 8) in _rank_options
+            else 8
+        ),
+        label="Rango LoRA",
+    )
+    _fold_options = {"3 particiones": 3, "5 particiones": 5, "10 particiones": 10}
+    _env_folds = _env_int("LICHESS_N_FOLDS", 5)
     n_folds = mo.ui.dropdown(
-        options={"3 particiones": 3, "5 particiones": 5, "10 particiones": 10},
-        value="5 particiones",
+        options=_fold_options,
+        value=f"{_env_folds} particiones" if _env_folds in _fold_options.values() else "5 particiones",
         label="Validación cruzada",
     )
-    cv_weight = mo.ui.checkbox(value=True, label="Validar ajuste de pesos")
-    cv_lora = mo.ui.checkbox(value=True, label="Validar ajuste LoRA")
+    cv_weight = mo.ui.checkbox(
+        value=bool(_env_int("LICHESS_CV_WEIGHT", 1)), label="Validar ajuste de pesos"
+    )
+    cv_lora = mo.ui.checkbox(
+        value=bool(_env_int("LICHESS_CV_LORA", 1)), label="Validar ajuste LoRA"
+    )
     train_button = mo.ui.run_button(label="Guardar parametros")
     mo.vstack(
         [
@@ -262,7 +304,7 @@ def _(
     train_button,
 ):
     mo.stop(
-        not train_button.value,
+        mo.running_in_notebook() and not train_button.value,
         mo.md("Pulsa **Guardar parametros**."),
     )
     mo.stop(

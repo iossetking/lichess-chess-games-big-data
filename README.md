@@ -54,9 +54,9 @@ inspección visual, no como una medida independiente de exactitud.
 ### Guardado de los modelos
 
 Los cuadernos guardan cada checkpoint con `save_policy_checkpoint`, que escribe
-el `state_dict` a media precisión (`float16`): el mismo modelo ocupa la mitad
-(unos 64 MB en lugar de 129 MB) y las predicciones apenas cambian, porque al
-cargar los tensores vuelven a `float32`.
+el `state_dict` a media precisión (`float16`). Los modelos nuevos de 18 planos
+ocupan unos **2.4 MB** (1.2 M parámetros) y las predicciones apenas cambian,
+porque al cargar los tensores vuelven a `float32`.
 
 - `data/models/` se versiona con **Git LFS**; `git lfs pull` descarga los pesos
   y un `.pt` sin descargar se detecta con un mensaje claro en vez de un error de
@@ -96,8 +96,17 @@ Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
 
 - **Entrada**: una cadena FEN (incluye posición, turno, enroques y captura al
   paso). No se usa una matriz suelta: el FEN ya transporta todo lo necesario.
-- **Codificación**: tensor `13 x 8 x 8` (6 planos de piezas blancas, 6 de negras
-  y 1 para el turno).
+- **Codificación**: tensor `18 x 8 x 8`. El tablero se mira siempre desde el
+  lado que tiene el turno: si mueven las negras se refleja el tablero y la
+  jugada, así que los mismos patrones se aprenden una sola vez para ambos
+  colores. Los planos son 6 piezas propias, 6 del rival, 4 derechos de enroque,
+  1 casilla de captura al paso y 1 con el turno original.
+- **Red**: torre convolucional residual (4 bloques `3x3`, campo receptivo de
+  todo el tablero) y cabeza espacial: cada casilla se proyecta a un vector de
+  origen y otro de destino, y una jugada puntúa como su producto escalar más
+  un sesgo aprendido `64 x 64`. Son **~1.2 M parámetros** (2.4 MB a media
+  precisión) en lugar de 34 M, y una jugada poco frecuente igual entrena sus
+  casillas de origen y destino.
 - **Salida**: una de `64 x 64 = 4096` clases `origen -> destino`.
 - **Legalidad**: antes del `softmax` se enmascaran las jugadas ilegales con
   `python-chess`, así que el modelo solo puede equivocarse de elección, nunca
@@ -106,17 +115,51 @@ Maia-3 es AGPL-3.0 y se instala desde su repositorio de GitHub.
   prueban dos formas de especializar el modelo con Stockfish. Ajustar todos los
   pesos puede deshacer parte de lo aprendido con una muestra pequeña, así que
   también se ofrece **LoRA**: la red se congela y solo se entrena una corrección
-  de bajo rango sobre la cabeza de jugadas, conservando la época con la menor
-  pérdida de validación. El cuaderno compara los tres modelos y guarda cada uno
-  por separado (`approach1_scratch.pt`, `approach1_weight_ftuning.pt`,
-  `approach1_lora_ftuning.pt`). El adaptador LoRA se fusiona antes de guardar,
-  así que ese archivo se carga como un `ChessPolicyNet` normal.
+  de bajo rango sobre las dos proyecciones de la cabeza de jugadas, conservando
+  la época con la menor pérdida de validación. El cuaderno compara los tres
+  modelos y guarda cada uno por separado (`approach1_scratch.pt`,
+  `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt`). El adaptador LoRA
+  se fusiona antes de guardar, así que ese archivo se carga como un
+  `ChessPolicyNet` normal.
+- **Optimización**: `train_model` usa Adam con decaimiento coseno de la tasa de
+  aprendizaje y restaura la época con la menor pérdida de validación, lo que
+  afina las probabilidades. El dispositivo se elige solo: CUDA, luego MPS y si
+  no, CPU (ver [Entrenar en Colab](#entrenar-en-colab)).
+- **Compatibilidad**: los checkpoints antiguos (`_v1`, `_v2`, 13 planos y cabeza
+  plana) se detectan y cargan automáticamente, así que se pueden comparar con
+  los nuevos en el cuaderno 4 y en la vista en vivo.
 - **Evaluación**: se reserva un **20 % de prueba** que no se toca hasta el final.
   El 80 % restante (desarrollo) se mide con **validación cruzada de 5
   particiones**, agrupando partidas completas por `game_id` para que la
   validación no contenga posiciones casi idénticas a las de entrenamiento. Con
   los resultados de la cruzada se eligen los ajustes, se reajustan los tres
   modelos con todo el desarrollo y se evalúan una sola vez en la prueba.
+
+### Entrenar en Colab
+
+Los cuadernos se pueden ejecutar sin interfaz (`uv run python notebooks/…`) y
+leen sus controles de variables de entorno, para hacer una prueba rápida local
+y lanzar el entrenamiento pesado en una GPU de Colab con `colab-cli`:
+
+| Cuaderno | Variables |
+|---|---|
+| `02_model_scratch_and_finetune.py` | `LICHESS_MAX_HUMAN`, `LICHESS_MAX_EVAL`, `LICHESS_EPOCHS_STAGE1`, `LICHESS_EPOCHS_STAGE2`, `LICHESS_EPOCHS_LORA`, `LICHESS_LORA_RANK`, `LICHESS_N_FOLDS`, `LICHESS_CV_WEIGHT`, `LICHESS_CV_LORA` |
+| `03_maia.py` | `LICHESS_MAIA_MODEL`, `LICHESS_MAIA_MAX_TRAIN`, `LICHESS_MAIA_EPOCHS`, `LICHESS_MAIA_RANK`, `LICHESS_MAIA_LR`, `LICHESS_MAIA_ELO` |
+
+Ejemplo de prueba local mínima (segundos):
+
+```bash
+LICHESS_MAX_HUMAN=2000 LICHESS_MAX_EVAL=2000 LICHESS_EPOCHS_STAGE1=1 \
+LICHESS_EPOCHS_STAGE2=1 LICHESS_EPOCHS_LORA=1 LICHESS_N_FOLDS=3 \
+LICHESS_CV_WEIGHT=0 LICHESS_CV_LORA=0 \
+uv run python notebooks/02_model_scratch_and_finetune.py
+```
+
+En Colab, sube los límites (por ejemplo `LICHESS_MAX_HUMAN=200000`) y descarga
+los `.pt` resultantes a `data/models/`; el cargador los reconoce sin cambios.
+Maia-3 es un transformer de 64 casillas y ocho posiciones de historia: en CPU
+tarda más de una hora, así que conviene entrenarlo siempre con GPU.
+
 
 Para el servidor final no basta con subir los números: el pipeline actual
 materializa las muestras en memoria (listas de Python y DataFrames completos,
@@ -218,21 +261,41 @@ guarda sus esquinas. Pulsa `r` para recalibrar al mover cámara o tablero;
 `--redetect-every 60` lo hace periódicamente si el encuadre cambia. Un tamaño
 `--imgsz 416` reduce el tiempo de inferencia con posible pérdida de detalle.
 
-Al terminar los cuadernos de este repositorio, conecta directamente el modelo
-de jugadas:
+Al terminar los cuadernos de este repositorio, conecta los modelos de jugadas.
+Sin argumentos extra, la vista en vivo carga los cinco checkpoints del proyecto
+que existan en `data/models/` y dibuja una flecha por modelo sobre el tablero
+real:
 
 ```bash
 uv run python scripts/live_chess_fen.py \
   --weights data/models/chess-pieces.pt \
-  --move-model data/models/approach1_lora_ftuning.pt \
-  --architecture scratch --turn w --castling KQkq
+  --turn w --castling KQkq
 ```
 
-La ventana muestra el FEN y actualiza la sugerencia sólo cuando la posición se
-mantiene igual durante cuatro frames. `t` alterna el turno y `f` rota la
-orientación si la cámara está del lado de negras. `--board-weights` acepta de
-forma opcional un YOLO-seg que tenga una clase `board` o `chessboard`; se usa
-como respaldo cuando las líneas de la cuadrícula están demasiado ocultas.
+Cada modelo tiene su color y su probabilidad se muestra en una etiqueta junto a
+la casilla de destino y en la leyenda de la esquina:
+
+| Modelo | Archivo | Color |
+|---|---|---|
+| Desde cero | `approach1_scratch.pt` | cian |
+| Ajuste de pesos | `approach1_weight_ftuning.pt` | naranja |
+| Ajuste LoRA | `approach1_lora_ftuning.pt` | verde |
+| Maia-3 humano | `maia3_lora_human.pt` | azul |
+| Maia-3 Stockfish | `maia3_lora_stockfish.pt` | magenta |
+
+Las flechas se proyectan con la homografía inversa y siguen el estilo SeeMate:
+trayectoria en L para los caballos, casilla de destino resaltada y etiquetas
+con la jugada en notación algebraica (`Nf6`) y su porcentaje. Para comparar
+otros archivos, pásalos con `--move-models` (uno o varios); `--move-model`
+sigue aceptando un único checkpoint. La arquitectura se detecta desde el
+archivo, así que ya no hace falta `--architecture`.
+
+La ventana muestra el FEN, el turno, el recuento de piezas y actualiza las
+sugerencias sólo cuando la posición se mantiene igual durante cuatro frames.
+`t` alterna el turno y `f` rota la orientación si la cámara está del lado de
+negras. `--board-weights` acepta de forma opcional un YOLO-seg que tenga una
+clase `board` o `chessboard`; se usa como respaldo cuando las líneas de la
+cuadrícula están demasiado ocultas.
 
 La imagen no puede saber quién tiene el turno, si una torre o rey ya se movió,
 ni la casilla de captura al paso. Para que el predictor sea correcto, conserva

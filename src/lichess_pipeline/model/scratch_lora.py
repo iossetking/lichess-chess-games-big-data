@@ -6,17 +6,17 @@ Plain full-weight fine-tuning updates every parameter, which on a small
 Stockfish sample can pull the network away from what Stage 1 learned. This
 module offers the constrained alternative:
 
-* the convolutions and the move head keep their Stage 1 weights, frozen;
-* a low-rank update ``B @ A`` is added to the head output, and only ``A`` and
-  ``B`` are trained;
+* the residual tower and the move head keep their Stage 1 weights, frozen;
+* the head's two square projections (``proj_from`` and ``proj_to``) get a
+  low-rank update ``B @ A``, and only those adapters are trained;
 * ``B`` starts at zero, so before training the adapted network is numerically
   identical to Stage 1;
-* :func:`merge_head_lora` folds the adapter into a plain
-  :class:`ChessPolicyNet`, which is what gets saved as a standalone checkpoint.
+* :func:`merge_head_lora` folds the adapters into plain ``nn.Linear`` layers,
+  which is what gets saved as a standalone checkpoint.
 
-The head holds ``8192 x 4096`` weights, so adapting it alone already covers most
-of the network's capacity while touching a tiny fraction of it (``rank`` 8 is
-about 100k trainable parameters out of roughly 34M).
+The spatial head projects each of the 64 square embeddings, so adapting its two
+projections already covers most of the network's move-selection capacity while
+touching a tiny fraction of it (``rank`` 8 is about 17k trainable parameters).
 """
 
 from __future__ import annotations
@@ -37,18 +37,19 @@ DEFAULT_EPOCHS = 3
 DEFAULT_LR = 1e-3
 DEFAULT_BATCH_SIZE = 128
 DEFAULT_WEIGHT_DECAY = 0.0
+DEFAULT_TARGETS = ("proj_from", "proj_to")
 
 
-class LoRAHead(nn.Module):
-    """A frozen move head plus a trainable low-rank correction.
+class LoRALinear(nn.Module):
+    """A frozen ``nn.Linear`` plus a trainable low-rank correction.
 
-    ``forward`` returns ``head(x) + scaling * dropout(x) @ A.T @ B.T``. ``B`` is
+    ``forward`` returns ``base(x) + scaling * dropout(x) @ A.T @ B.T``. ``B`` is
     initialised to zero so the adapter starts as an exact identity.
     """
 
     def __init__(
         self,
-        head: nn.Linear,
+        base: nn.Linear,
         rank: int = DEFAULT_RANK,
         alpha: float = DEFAULT_ALPHA,
         dropout: float = DEFAULT_DROPOUT,
@@ -56,56 +57,59 @@ class LoRAHead(nn.Module):
         super().__init__()
         if rank < 1:
             raise ValueError("LoRA rank must be at least 1")
-        self.head = head
-        for parameter in self.head.parameters():
+        self.base = base
+        for parameter in self.base.parameters():
             parameter.requires_grad_(False)
         self.scaling = alpha / rank
-        self.lora_a = nn.Parameter(torch.empty(rank, head.in_features))
-        self.lora_b = nn.Parameter(torch.zeros(head.out_features, rank))
+        self.lora_a = nn.Parameter(torch.empty(rank, base.in_features))
+        self.lora_b = nn.Parameter(torch.zeros(base.out_features, rank))
         nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         update = self.dropout(x) @ self.lora_a.T @ self.lora_b.T
-        return self.head(x) + self.scaling * update
+        return self.base(x) + self.scaling * update
 
 
 class LoRAPolicyNet(nn.Module):
-    """``ChessPolicyNet`` with its head replaced by a :class:`LoRAHead`.
+    """``ChessPolicyNet`` with trainable adapters inside its spatial head.
 
     The wrapper exists only while training. Its output has the same shape and
     meaning as the base network's (raw logits over the 4096 move classes), so
     the training and evaluation helpers in ``scratch_net`` accept it unchanged.
     """
 
-    def __init__(self, base: ChessPolicyNet, adapter: LoRAHead) -> None:
+    def __init__(
+        self, base: ChessPolicyNet, targets: tuple[str, ...] = DEFAULT_TARGETS
+    ) -> None:
         super().__init__()
         self.base = base
-        self.adapter = adapter
+        self.targets = tuple(targets)
+        adapter = getattr(base.head, self.targets[0])
         self.lora_config = {
             "rank": int(adapter.lora_a.shape[0]),
             "alpha": float(adapter.scaling * adapter.lora_a.shape[0]),
             "dropout": float(adapter.dropout.p),
-            "target": "head",
+            "targets": list(self.targets),
         }
         self.best_epoch = 0
         self.best_val_loss = math.inf
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = torch.flatten(self.base.features(x), start_dim=1)
-        return self.adapter(features)
+        return self.base(x)
 
     def train(self, mode: bool = True) -> LoRAPolicyNet:
-        """Keep the frozen base in eval mode, including its BatchNorm buffers.
+        """Keep the frozen tower in eval mode, including its BatchNorm buffers.
 
         ``requires_grad_(False)`` stops the optimiser but not BatchNorm, which
         keeps updating ``running_mean``/``running_var`` in training mode. Left
         alone, a "frozen" network would still change its outputs. Only the
-        adapter follows the requested mode (for its dropout).
+        adapters follow the requested mode (for their dropout).
         """
         super().train(mode)
         self.base.eval()
-        self.adapter.train(mode)
+        for name in self.targets:
+            getattr(self.base.head, name).train(mode)
         return self
 
 
@@ -115,14 +119,25 @@ def apply_head_lora(
     alpha: float = DEFAULT_ALPHA,
     dropout: float = DEFAULT_DROPOUT,
 ) -> LoRAPolicyNet:
-    """Freeze ``model`` and wrap it in a trainable head adapter, in place."""
+    """Freeze ``model`` and wrap its head projections with LoRA, in place."""
     if rank < 1:
         raise ValueError("LoRA rank must be at least 1")
+    if not isinstance(model, ChessPolicyNet):
+        raise TypeError("Expected a ChessPolicyNet with a spatial move head")
     for parameter in model.parameters():
         parameter.requires_grad_(False)
-    adapter = LoRAHead(model.head, rank=rank, alpha=alpha, dropout=dropout)
-    adapter.to(model.head.weight.device)
-    return LoRAPolicyNet(model, adapter)
+    wrapped: list[str] = []
+    for name in DEFAULT_TARGETS:
+        linear = getattr(model.head, name)
+        if not isinstance(linear, nn.Linear):
+            continue
+        adapter = LoRALinear(linear, rank=rank, alpha=alpha, dropout=dropout)
+        adapter.to(linear.weight.device)
+        setattr(model.head, name, adapter)
+        wrapped.append(name)
+    if not wrapped:
+        raise ValueError("The spatial head has no projections to adapt")
+    return LoRAPolicyNet(model, tuple(wrapped))
 
 
 def count_trainable_parameters(model: nn.Module) -> tuple[int, int]:
@@ -145,7 +160,7 @@ def train_head_lora(
     weight_decay: float = DEFAULT_WEIGHT_DECAY,
     keep_best: bool = True,
 ) -> list[dict[str, float]]:
-    """Train only the adapter, optionally keeping the best validation epoch.
+    """Train only the adapters, optionally keeping the best validation epoch.
 
     The history rows use the same keys as ``scratch_net.train_model`` so the
     three approaches can share plotting code. With ``keep_best`` the adapter is
@@ -164,6 +179,7 @@ def train_head_lora(
     if not trainable:
         raise ValueError("Nothing to train: call apply_head_lora first")
 
+    device = trainable[0].device
     torch.manual_seed(seed)
     optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss()
@@ -177,7 +193,7 @@ def train_head_lora(
     history: list[dict[str, float]] = []
 
     best_loss = (
-        _validation_metrics(model, val_loader, criterion)["loss"]
+        _validation_metrics(model, val_loader, criterion, device)["loss"]
         if keep_best
         else math.inf
     )
@@ -189,6 +205,11 @@ def train_head_lora(
         running_loss = 0.0
         seen = 0
         for features, targets, masks in train_loader:
+            features, targets, masks = (
+                features.to(device),
+                targets.to(device),
+                masks.to(device),
+            )
             optimizer.zero_grad(set_to_none=True)
             logits = _masked_logits(model, features, masks)
             loss = criterion(logits, targets)
@@ -196,7 +217,7 @@ def train_head_lora(
             optimizer.step()
             running_loss += loss.item() * targets.size(0)
             seen += targets.size(0)
-        metrics = _validation_metrics(model, val_loader, criterion)
+        metrics = _validation_metrics(model, val_loader, criterion, device)
         history.append(
             {
                 "epoch": float(epoch),
@@ -220,16 +241,26 @@ def train_head_lora(
 
 
 def merge_head_lora(model: LoRAPolicyNet) -> ChessPolicyNet:
-    """Fold the adapter into a standalone :class:`ChessPolicyNet`.
+    """Fold the adapters into a standalone :class:`ChessPolicyNet`.
 
-    Returns a deep copy of the frozen base whose head weight includes
+    Returns a deep copy of the frozen base whose head projections include
     ``scaling * B @ A``. The result has plain ``ChessPolicyNet`` keys, so it can
     be saved and reloaded without any LoRA bookkeeping.
     """
     merged = copy.deepcopy(model.base)
-    adapter = model.adapter
-    with torch.no_grad():
-        merged.head.weight.add_(adapter.scaling * (adapter.lora_b @ adapter.lora_a))
+    for name in model.targets:
+        adapter = getattr(merged.head, name)
+        base = adapter.base
+        plain = nn.Linear(
+            base.in_features, base.out_features, bias=base.bias is not None
+        ).to(base.weight.device)
+        with torch.no_grad():
+            plain.weight.copy_(
+                base.weight + adapter.scaling * (adapter.lora_b @ adapter.lora_a)
+            )
+            if base.bias is not None:
+                plain.bias.copy_(base.bias)
+        setattr(merged.head, name, plain)
     for parameter in merged.parameters():
         parameter.requires_grad_(True)
     merged.eval()
@@ -251,7 +282,10 @@ def _masked_logits(
 
 
 def _validation_metrics(
-    model: LoRAPolicyNet, loader: DataLoader, criterion: nn.Module
+    model: LoRAPolicyNet,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
@@ -261,6 +295,11 @@ def _validation_metrics(
     total = 0
     with torch.no_grad():
         for features, targets, masks in loader:
+            features, targets, masks = (
+                features.to(device),
+                targets.to(device),
+                masks.to(device),
+            )
             logits = _masked_logits(model, features, masks)
             total_loss += criterion(logits, targets).item() * targets.size(0)
             top_k = logits.topk(3, dim=1).indices

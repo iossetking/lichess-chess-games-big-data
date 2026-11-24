@@ -45,17 +45,23 @@ def test_two_stage_training_and_maia_adapter_run_on_mini_sample():
     dataset = make_tensor_dataset(sample_df, "fen", "move_uci")
 
     model = ChessPolicyNet()
-    history_stage1 = train_model(model, dataset, dataset, epochs=2, lr=1e-2, batch_size=8)
+    history_stage1 = train_model(
+        model, dataset, dataset, epochs=2, lr=1e-2, batch_size=8
+    )
     assert len(history_stage1) == 2
     assert {"epoch", "train_loss", "val_loss", "val_top1", "val_top3"} <= set(
         history_stage1[-1]
     )
 
-    history_stage2 = train_model(model, dataset, dataset, epochs=1, lr=1e-4, batch_size=8)
+    history_stage2 = train_model(
+        model, dataset, dataset, epochs=1, lr=1e-4, batch_size=8
+    )
     assert len(history_stage2) == 1
 
     maia_model = MaiaResidualPolicyNet(channels=32, num_blocks=2)
-    maia_history = train_model(maia_model, dataset, dataset, epochs=1, lr=1e-3, batch_size=8)
+    maia_history = train_model(
+        maia_model, dataset, dataset, epochs=1, lr=1e-3, batch_size=8
+    )
     assert len(maia_history) == 1
     assert len(predict_top_moves(maia_model, chess.STARTING_FEN, top_k=3)) == 3
 
@@ -83,7 +89,7 @@ def test_make_tensor_dataset_rejects_an_empty_frame():
 
 def test_train_model_rejects_an_empty_dataset():
     empty = torch.utils.data.TensorDataset(
-        torch.zeros((0, 13, 8, 8)),
+        torch.zeros((0, 18, 8, 8)),
         torch.zeros((0,), dtype=torch.long),
         torch.zeros((0, 4096), dtype=torch.bool),
     )

@@ -1,8 +1,13 @@
-"""Live camera pipeline: automatic board detection -> YOLO pieces -> FEN.
+"""Live camera pipeline: automatic board detection -> YOLO pieces -> FEN -> 5 models.
 
 Example:
     uv run python scripts/live_chess_fen.py \
-      --weights data/models/chess-pieces.pt --move-model data/models/approach1_lora_ftuning.pt
+      --weights data/models/chess-pieces.pt --turn w --castling KQkq
+
+Without ``--move-models`` the five project checkpoints that exist in
+``data/models/`` are loaded (scratch, weight fine-tune, LoRA fine-tune, and the
+two Maia-3 LoRA adapters). Each model contributes a coloured perspective arrow
+with the move in SAN and its probability, SeeMate-style.
 
 The piece checkpoint may use six shape classes (pawn, knight, bishop, rook,
 queen, king) or twelve coloured classes. FEN requires coloured classes.  An ordinary COCO YOLO checkpoint cannot
@@ -12,11 +17,12 @@ recognise chess pieces.
 from __future__ import annotations
 
 import argparse
+import itertools
 import sys
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import perf_counter, sleep
-from typing import Any
+from typing import Any, NamedTuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src"
@@ -28,19 +34,53 @@ import numpy as np
 
 from lichess_pipeline.chess_vision import (
     DEFAULT_BOARD_SIZE,
+    PIECE_CLASSES,
     FenStabilizer,
     PieceDetection,
-    PIECE_CLASSES,
     PieceLabelSmoother,
     board_destination,
     crop_piece,
-    fuse_piece_probabilities,
     detect_board_corners,
     detect_green_screen_board,
     detections_to_fen,
+    fuse_piece_probabilities,
     piece_description_from_label,
     piece_symbol_from_label,
 )
+
+# The five models the project compares on the live screen, in this order.
+DEFAULT_MOVE_MODELS = (
+    "approach1_scratch.pt",
+    "approach1_weight_ftuning.pt",
+    "approach1_lora_ftuning.pt",
+    "maia3_lora_human.pt",
+    "maia3_lora_stockfish.pt",
+)
+# Display style per checkpoint stem: short label and BGR arrow colour.
+POLICY_STYLES: dict[str, tuple[str, tuple[int, int, int]]] = {
+    "approach1_scratch": ("Scratch", (255, 255, 0)),
+    "approach1_weight_ftuning": ("Weight-FT", (0, 165, 255)),
+    "approach1_lora_ftuning": ("LoRA-FT", (80, 255, 80)),
+    "maia3_lora_human": ("Maia-Human", (255, 144, 30)),
+    "maia3_lora_stockfish": ("Maia-SF", (235, 80, 235)),
+}
+FALLBACK_COLOURS = ((200, 200, 200), (0, 255, 200), (200, 120, 255))
+
+
+class PolicyStyle(NamedTuple):
+    """One loaded move predictor with the label and colour of its overlay."""
+
+    label: str
+    colour: tuple[int, int, int]
+    model: Any
+
+
+def style_for(path: Path, index: int) -> tuple[str, tuple[int, int, int]]:
+    """Return the short label and BGR colour for a checkpoint."""
+    return POLICY_STYLES.get(
+        path.stem,
+        (path.stem.replace("_", " ")[:16], FALLBACK_COLOURS[index % len(FALLBACK_COLOURS)]),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,8 +124,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--turn", choices=("w", "b"), default="w", help="Side to move; press t in the window to toggle")
     parser.add_argument("--castling", default="-", help="Known castling rights, e.g. KQkq (vision cannot infer this)")
     parser.add_argument("--en-passant", default="-", help="Known en-passant target (vision cannot infer this)")
-    parser.add_argument("--move-model", type=Path, help="Optional trained policy checkpoint from this repository")
-    parser.add_argument("--architecture", choices=("scratch", "maia"), default="scratch", help="Architecture of --move-model")
+    parser.add_argument("--move-model", type=Path, help="Optional single trained policy checkpoint (legacy alias)")
+    parser.add_argument(
+        "--move-models",
+        type=Path,
+        nargs="+",
+        help="Move checkpoints to compare on the live screen (default: the five project models that exist)",
+    )
+    parser.add_argument(
+        "--architecture",
+        choices=("auto", "scratch", "maia"),
+        default="auto",
+        help="Deprecated: the checkpoint file now decides its architecture",
+    )
     return parser.parse_args()
 
 
@@ -244,8 +295,14 @@ class LiveInference:
     """Run board localization and YOLO independently of the display loop."""
 
     def __init__(self, camera: LatestFrameCamera, pieces: YoloPieceDetector,
-                 board_segmenter: YoloBoardSegmenter | None, policy: Any, args: argparse.Namespace) -> None:
-        self.camera, self.pieces, self.board_segmenter, self.policy, self.args = camera, pieces, board_segmenter, policy, args
+                 board_segmenter: YoloBoardSegmenter | None, policies: Any, args: argparse.Namespace) -> None:
+        self.camera, self.pieces, self.board_segmenter, self.args = camera, pieces, board_segmenter, args
+        if policies is None:
+            self.policies: list[PolicyStyle] = []
+        elif isinstance(policies, list):
+            self.policies = policies
+        else:  # a single model keeps the old constructor working
+            self.policies = [PolicyStyle("Model", FALLBACK_COLOURS[0], policies)]
         self._lock = Lock()
         self._stop = Event()
         self._thread = Thread(target=self._run, daemon=True)
@@ -253,6 +310,7 @@ class LiveInference:
         self.board_image: np.ndarray | None = None
         self.fen = "Waiting for board"
         self.move = ""
+        self.results: list[dict[str, Any]] = []
         self.inference_fps = 0.0
         self.last_result_at = 0.0
         self.latency_ms = 0.0
@@ -271,18 +329,20 @@ class LiveInference:
             if key == ord("r"):
                 self.corners = None
                 self.board_image = None
-                self.fen, self.move = "Waiting for board", ""
+                self.fen, self.move, self.results = "Waiting for board", "", []
             elif key == ord("f"):
                 self.flip = not self.flip
             elif key == ord("t"):
                 self.turn = "b" if self.turn == "w" else "w"
             self.generation += 1
 
-    def snapshot(self) -> tuple[np.ndarray | None, np.ndarray | None, str, str, float, float, float]:
+    def snapshot(self) -> tuple[np.ndarray | None, np.ndarray | None, str, str, float, float, float, list[dict[str, Any]]]:
         with self._lock:
             return (None if self.corners is None else self.corners.copy(),
                     None if self.board_image is None else self.board_image.copy(),
-                    self.fen, self.move, self.inference_fps, self.last_result_at, self.latency_ms)
+                    self.fen, self.move, self.inference_fps, self.last_result_at, self.latency_ms,
+                    [dict(result) for result in self.results])
+
 
     def _run(self) -> None:
         destination = board_destination(self.args.size)
@@ -339,17 +399,40 @@ class LiveInference:
             fen = detections_to_fen(mapped, self.args.size, turn=turn,
                                     castling=self.args.castling, en_passant=self.args.en_passant)
             published = stabilizer.update(fen) if can_publish else None
-            move = None
-            if published is not None and self.policy is not None:
+            results: list[dict[str, Any]] = []
+            message = ""
+            if published is not None and self.policies:
                 import chess
 
                 from lichess_pipeline.model import predict_top_moves
                 position = chess.Board(published)
                 if position.is_valid():
-                    moves = predict_top_moves(self.policy, published, top_k=1)
-                    move = f"Best move: {moves[0][0]} ({moves[0][1]:.1%})" if moves else "No legal move"
+                    for style in self.policies:
+                        moves = predict_top_moves(style.model, published, top_k=1)
+                        if not moves:
+                            continue
+                        uci, probability = moves[0]
+                        try:
+                            san = position.san(chess.Move.from_uci(uci))
+                        except (ValueError, AssertionError):
+                            san = uci
+                        results.append(
+                            {
+                                "label": style.label,
+                                "colour": style.colour,
+                                "uci": uci,
+                                "san": san,
+                                "probability": probability,
+                            }
+                        )
+                    message = ", ".join(
+                        f"{item['label']}: {item['san']} {item['probability']:.0%}"
+                        for item in results
+                    )
+                    if not message:
+                        message = "No legal move"
                 else:
-                    move = "FEN invalid: verify detections/context"
+                    message = "FEN invalid: verify detections/context"
             elapsed = max(perf_counter() - started, 1e-6)
             with self._lock:
                 if generation != self.generation:
@@ -359,12 +442,12 @@ class LiveInference:
                 self.latency_ms = (perf_counter() - captured_at) * 1000
                 if not can_publish:
                     self.fen = "FEN needs board + coloured piece labels"
-                    self.move = ""
+                    self.move, self.results = "", []
                     stabilizer = FenStabilizer(self.args.stable_frames)
                 if published is not None:
                     self.fen = published
-                    if move is not None:
-                        self.move = move
+                    if message:
+                        self.move, self.results = message, results
                 self.inference_fps = 1 / elapsed
                 self.last_result_at = perf_counter()
             processed += 1
@@ -433,17 +516,191 @@ def draw_detections(image: np.ndarray, detections: list[PieceDetection]) -> None
         cv2.putText(image, text, (left + 3, bottom - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
 
-def load_policy(path: Path, architecture: str) -> Any:
-    if architecture == "scratch":
-        from lichess_pipeline.model.checkpoints import load_policy_checkpoint
+def load_policies(paths: list[Path], device: str | None = None) -> list[PolicyStyle]:
+    """Load every existing checkpoint, skipping (and reporting) the missing ones."""
+    from lichess_pipeline.model.checkpoints import load_policy_checkpoint
 
-        return load_policy_checkpoint(path)
-    import torch
+    policies: list[PolicyStyle] = []
+    for index, path in enumerate(paths):
+        if not path.is_file():
+            print(f"Skip {path} (not found)", file=sys.stderr)
+            continue
+        try:
+            model = load_policy_checkpoint(path, device=device)
+        except Exception as error:  # noqa: BLE001 - one broken file must not stop the demo
+            print(f"Skip {path.name}: {error}", file=sys.stderr)
+            continue
+        label, colour = style_for(path, index)
+        policies.append(PolicyStyle(label, colour, model))
+        print(f"Loaded {label}: {path}")
+    return policies
 
-    from lichess_pipeline.model.maia_adapter import MaiaResidualPolicyNet
-    model = MaiaResidualPolicyNet()
-    model.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
-    return model
+
+def requested_policy_paths(args: argparse.Namespace) -> list[Path]:
+    """CLI paths, or the five project models that exist under data/models."""
+    if args.move_models:
+        return list(args.move_models)
+    if args.move_model:
+        return [args.move_model]
+    models_dir = Path("data/models")
+    return [path for path in (models_dir / name for name in DEFAULT_MOVE_MODELS) if path.is_file()]
+
+
+# --------------------------------------------------------------------------
+# SeeMate-style AR overlay
+# --------------------------------------------------------------------------
+
+def square_center(square: str, board_size: int, flip: bool) -> tuple[float, float]:
+    """Centre of ``square`` in rectified-board pixels, honouring ``flip``."""
+    file_index = ord(square[0]) - ord("a")
+    rank_index = 8 - int(square[1])
+    x = (file_index + 0.5) * board_size / 8
+    y = (rank_index + 0.5) * board_size / 8
+    if flip:
+        x, y = board_size - 1 - x, board_size - 1 - y
+    return x, y
+
+
+def _projector(corners: np.ndarray, board_size: int):
+    matrix = cv2.getPerspectiveTransform(
+        board_destination(board_size), np.asarray(corners, dtype=np.float32)
+    )
+
+    def project(point: tuple[float, float]) -> tuple[int, int]:
+        projected = cv2.perspectiveTransform(
+            np.array([[point]], dtype=np.float32), matrix
+        )[0, 0]
+        return int(np.rint(projected[0])), int(np.rint(projected[1]))
+
+    return project
+
+
+def _is_knight_move(from_square: str, to_square: str) -> bool:
+    file_delta = abs(ord(from_square[0]) - ord(to_square[0]))
+    rank_delta = abs(int(from_square[1]) - int(to_square[1]))
+    return sorted((file_delta, rank_delta)) == [1, 2]
+
+
+def _arrow_polyline(
+    from_square: str, to_square: str, board_size: int, flip: bool
+) -> list[tuple[float, float]]:
+    """Rectified-board points for a straight or L-shaped (knight) arrow."""
+    start = square_center(from_square, board_size, flip)
+    end = square_center(to_square, board_size, flip)
+    if _is_knight_move(from_square, to_square):
+        knee = square_center(f"{to_square[0]}{from_square[1]}", board_size, flip)
+        return [start, knee, end]
+    return [start, end]
+
+
+def _shift_perpendicular(
+    points: list[tuple[int, int]], offset: float
+) -> list[tuple[int, int]]:
+    """Fan out arrows that share the same move so every colour stays visible."""
+    if not offset or len(points) < 2:
+        return points
+    (x1, y1), (x2, y2) = points[0], points[-1]
+    dx, dy = x2 - x1, y2 - y1
+    length = float(np.hypot(dx, dy)) or 1.0
+    ox, oy = -dy / length * offset, dx / length * offset
+    return [(int(x + ox), int(y + oy)) for x, y in points]
+
+
+def _translucent_rect(
+    image: np.ndarray,
+    top_left: tuple[int, int],
+    bottom_right: tuple[int, int],
+    colour: tuple[int, int, int],
+    alpha: float = 0.75,
+) -> None:
+    height, width = image.shape[:2]
+    x1, y1 = max(0, top_left[0]), max(0, top_left[1])
+    x2, y2 = min(width - 1, bottom_right[0]), min(height - 1, bottom_right[1])
+    if x2 <= x1 or y2 <= y1:
+        return
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), colour, -1)
+    cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
+
+
+def draw_ar_overlay(
+    image: np.ndarray,
+    corners: np.ndarray,
+    board_size: int,
+    results: list[dict[str, Any]],
+    turn: str,
+    flip: bool,
+    fen: str = "",
+) -> None:
+    """Project the board and each model's move onto the live camera frame."""
+    height, width = image.shape[:2]
+    project = _projector(corners, board_size)
+    outer = [
+        project((0, 0)),
+        project((board_size - 1, 0)),
+        project((board_size - 1, board_size - 1)),
+        project((0, board_size - 1)),
+    ]
+    cv2.polylines(image, [np.array(outer, np.int32)], True, (0, 255, 0), 2, cv2.LINE_AA)
+
+    groups: dict[str, list[int]] = {}
+    for index, item in enumerate(results):
+        groups.setdefault(str(item["uci"]), []).append(index)
+
+    anchors: dict[int, tuple[int, int]] = {}
+    for indices in groups.values():
+        for order, index in enumerate(indices):
+            item = results[index]
+            uci = str(item["uci"])
+            points = _arrow_polyline(uci[:2], uci[2:4], board_size, flip)
+            camera_points = [project(point) for point in points]
+            offset = 0.0 if len(indices) == 1 else (order - (len(indices) - 1) / 2) * 12
+            camera_points = _shift_perpendicular(camera_points, offset)
+            segments = list(itertools.pairwise(camera_points))
+            for start, end in segments[:-1]:
+                cv2.line(image, start, end, item["colour"], 3, cv2.LINE_AA)
+            cv2.arrowedLine(
+                image,
+                segments[-1][0],
+                segments[-1][1],
+                item["colour"],
+                3,
+                cv2.LINE_AA,
+                tipLength=0.2,
+            )
+            anchors[index] = (camera_points[-1][0], camera_points[-1][1] - 6 - order * 22)
+
+    for index, item in enumerate(results):
+        anchor = anchors[index]
+        text = f"{item['san']} {item['probability']:.0%}"
+        (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        x = min(max(4, anchor[0] + 8), max(4, width - tw - 20))
+        y = min(max(th + 8, anchor[1]), max(th + 8, height - baseline - 8))
+        _translucent_rect(image, (x - 5, y - th - 5), (x + tw + 5, y + baseline), item["colour"], 0.85)
+        cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+
+    white = sum(1 for char in fen.split(" ")[0] if char.isupper()) if fen else 0
+    black = sum(1 for char in fen.split(" ")[0] if char.islower()) if fen else 0
+    hud_lines = [
+        f"TURN: {'WHITE' if turn == 'w' else 'BLACK'}  [t]",
+        f"PIECES: white {white} / black {black}",
+        f"FEN: {fen[:32]}",
+    ]
+    top_left = (10, 8)
+    panel_height = 24 * len(hud_lines) + 8
+    _translucent_rect(image, top_left, (430, top_left[1] + panel_height), (24, 24, 24), 0.6)
+    for row, line in enumerate(hud_lines):
+        cv2.putText(image, line, (18, 30 + row * 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1, cv2.LINE_AA)
+
+    if results:
+        legend_top = height - 26 * len(results) - 14
+        _translucent_rect(image, (10, legend_top - 6), (360, height - 10), (24, 24, 24), 0.6)
+        for row, item in enumerate(results):
+            y = legend_top + row * 26 + 14
+            cv2.circle(image, (22, y - 5), 6, item["colour"], -1, cv2.LINE_AA)
+            text = f"{item['label']}: {item['san']} {item['probability']:.0%}"
+            cv2.putText(image, text, (36, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1, cv2.LINE_AA)
+
 
 
 def main() -> int:
@@ -474,10 +731,15 @@ def main() -> int:
         if args.require_segmentation and not pieces.is_segmentation:
             raise RuntimeError("--require-segmentation needs YOLO-seg weights, not a detection checkpoint")
         board_segmenter = YoloBoardSegmenter(args.board_weights) if args.board_weights else None
-        policy = load_policy(args.move_model, args.architecture) if args.move_model else None
+        policies = load_policies(requested_policy_paths(args), args.device)
     except RuntimeError as error:
         print(error, file=sys.stderr)
         return 2
+    if not policies:
+        print(
+            "Sin checkpoints de jugadas: solo se mostrará la visión. Pásalos con --move-models.",
+            file=sys.stderr,
+        )
 
     camera = LatestFrameCamera(args.camera)
     if not camera.is_opened():
@@ -485,7 +747,7 @@ def main() -> int:
         return 1
     camera.start()
 
-    inference = LiveInference(camera, pieces, board_segmenter, policy, args)
+    inference = LiveInference(camera, pieces, board_segmenter, policies, args)
     inference.start()
     print("Live camera + background YOLO. r recalibrates; q/Esc exits; t toggles turn; f flips orientation.")
     try:
@@ -494,12 +756,31 @@ def main() -> int:
             if frame is None:
                 cv2.waitKey(1)
                 continue
-            corners, board, visible_fen, visible_move, inference_fps, updated_at, latency_ms = inference.snapshot()
+            (
+                corners,
+                board,
+                visible_fen,
+                visible_move,
+                inference_fps,
+                updated_at,
+                latency_ms,
+                results,
+            ) = inference.snapshot()
             preview = frame.copy()
             if corners is None:
                 cv2.putText(preview, "Looking for 8x8 board grid", (20, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             else:
                 cv2.polylines(preview, [corners.astype(np.int32)], True, (0, 255, 0), 3)
+                if results:
+                    draw_ar_overlay(
+                        preview,
+                        corners,
+                        args.size,
+                        results,
+                        inference.turn,
+                        inference.flip,
+                        visible_fen,
+                    )
             if board is not None:
                 cv2.imshow("Pieces | boxes + confidence", board)
             age = perf_counter() - updated_at if updated_at else 0.0

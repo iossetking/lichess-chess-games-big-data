@@ -22,6 +22,65 @@ tras clonar. Los pesos de visión de YOLO (`chess-pieces*.pt`,
 `chess-piece-classifier.pt`) pueden venir en el repositorio, y si faltan se
 generan con los entrenadores de `scripts/` (ver la sección de visión).
 
+## Dos rutas de trabajo
+
+El repositorio se puede usar sin entrenar nada o reconstruyendo todo desde los
+datos oficiales de Lichess. Elige una:
+
+### Ruta A · Usar los modelos ya guardados (rápida)
+
+Los cinco modelos de jugadas, las muestras limpias y, si están publicados, los
+pesos de visión se descargan con Git LFS:
+
+```bash
+uv sync
+git lfs pull
+ls data/models/approach1_scratch.pt data/models/approach1_weight_ftuning.pt \
+   data/models/approach1_lora_ftuning.pt data/models/maia3_lora_human.pt \
+   data/models/maia3_lora_stockfish.pt
+```
+
+Con eso funcionan directamente (si algún checkpoint todavía no está publicado en
+el repositorio, genéralo con la ruta B):
+
+- **Comparar modelos**: `uv run marimo edit notebooks/04_model_playground.py`
+  (no entrena; solo carga los `.pt` que existan en `data/models/`).
+- **Vista en vivo**: `uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt`
+  (ver la sección «Visión en vivo» más abajo; si falta `chess-pieces.pt`,
+  entrénalo con la ruta B).
+
+No hace falta ejecutar los cuadernos 01–03 ni descargar los archivos de Lichess.
+
+### Ruta B · Entrenar desde cero
+
+Se parte de la muestra oficial de Lichess y se generan todas las salidas
+(`data/processed/*.parquet` y `data/models/*.pt`):
+
+1. **Muestra limpia** (streaming desde `database.lichess.org`):
+   ```bash
+   uv run python notebooks/01_eda_and_cleaning.py
+   ```
+2. **Tres modelos de jugadas** (red desde cero + dos ajustes con Stockfish):
+   ```bash
+   uv run python notebooks/02_model_scratch_and_finetune.py
+   ```
+3. **Dos adaptadores Maia-3 + LoRA** (GPU recomendada; en CPU tarda más de una
+   hora):
+   ```bash
+   uv run python notebooks/03_maia.py
+   ```
+4. **Detector de piezas YOLO** para la visión (o reutiliza el que ya esté en
+   `data/models/chess-pieces.pt`):
+   ```bash
+   uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
+   ```
+
+Los cuadernos sin interfaz leen tamaños y épocas de variables de entorno (ver
+[Entrenar en Colab](#entrenar-en-colab)), así que la misma ruta sirve para una
+prueba local de segundos o para una corrida grande en Colab. Al terminar,
+`data/models/` contiene los cinco modelos y puedes seguir la ruta A para
+compararlos y probarlos en vivo.
+
 ## Cuadernos de datos y predicción (entrega parcial)
 
 Todo se lee directamente de `database.lichess.org`; no se necesita descargar un
@@ -33,11 +92,12 @@ los archivos crudos siguen fuera de Git).
 | Cuaderno | Contenido | Salidas |
 |---|---|---|
 | `notebooks/01_eda_and_cleaning.py` | Exploración y limpieza de partidas `.pgn.zst` y evaluaciones `lichess_db_eval.jsonl.zst` | `games_clean_sample.parquet`, `positions_games_sample.parquet`, `evals_clean_sample.parquet` |
-| `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y dos ajustes finos con Stockfish (todos los pesos y LoRA en la cabeza) | `approach1_scratch.pt`, `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt` |
+| `notebooks/02_model_scratch_and_finetune.py` | **Enfoque 1**: red convolucional entrenada desde cero con jugadas humanas y dos ajustes finos con Stockfish (todos los pesos y LoRA en el tronco y la cabeza) | `approach1_scratch.pt`, `approach1_weight_ftuning.pt`, `approach1_lora_ftuning.pt` |
 | `notebooks/03_maia.py` | **Enfoque 3**: Maia-3 preentrenado ajustado con LoRA; un modelo con jugadas humanas y otro con jugadas de Stockfish | `maia3_lora_human.pt`, `maia3_lora_stockfish.pt` |
 | `notebooks/04_model_playground.py` | **Prueba visual**: detecta todos los `.pt`/`.pth` bajo `data/models/` (incluidas subcarpetas) y compara las jugadas de los checkpoints elegidos en un FEN o en una partida guardada; no entrena | — |
 
-Ejecuta los cuadernos en orden:
+La **ruta A** se salta este bloque: los Parquet y los `.pt` ya vienen en Git
+LFS. La **ruta B** ejecuta los cuadernos en orden:
 
 ```bash
 uv run marimo edit notebooks/01_eda_and_cleaning.py
@@ -195,21 +255,21 @@ caja se asigna a una casilla y se construye el FEN.
 
 ### 1 · Consigue los pesos de piezas
 
-El lector necesita un checkpoint YOLO con las 12 clases coloreadas. El
-repositorio versiona los pesos de visión en `data/models/` con Git LFS:
+El lector necesita un checkpoint YOLO con las 12 clases coloreadas.
 
-```bash
-git lfs pull
-```
-
-Si no están disponibles, entrena el detector público. El comando descarga el
-espejo combinado [dopaul/chess-pieces-merged](https://huggingface.co/datasets/dopaul/chess-pieces-merged),
-CC BY 4.0, exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
-mejor checkpoint a `data/models/chess-pieces.pt`:
-
-```bash
-uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
-```
+- **Ruta A (sin entrenar):** el repositorio versiona los pesos de visión en
+  `data/models/` con Git LFS:
+  ```bash
+  git lfs pull
+  ```
+- **Ruta B (entrenar desde cero):** si el archivo no está publicado, entrena el
+  detector público. El comando descarga el espejo combinado
+  [dopaul/chess-pieces-merged](https://huggingface.co/datasets/dopaul/chess-pieces-merged),
+  CC BY 4.0, exporta los datos en formato YOLO, ajusta `yolo11n.pt` y copia el
+  mejor checkpoint a `data/models/chess-pieces.pt`:
+  ```bash
+  uv run python scripts/train_chess_piece_yolo.py --epochs 50 --device mps
+  ```
 
 Para uso confiable, añade al ajuste fotos de tu cámara, piezas e iluminación.
 
@@ -278,10 +338,9 @@ guarda sus esquinas. Pulsa `r` para recalibrar al mover cámara o tablero;
 `--redetect-every 60` lo hace periódicamente si el encuadre cambia. Un tamaño
 `--imgsz 416` reduce el tiempo de inferencia con posible pérdida de detalle.
 
-Al terminar los cuadernos de este repositorio, conecta los modelos de jugadas.
-Sin argumentos extra, la vista en vivo carga los cinco checkpoints del proyecto
-que existan en `data/models/` y dibuja una flecha por modelo sobre el tablero
-real:
+Con los modelos de jugadas en `data/models/` (ruta A ya incluida, o salida de
+la ruta B), la vista en vivo los carga sin argumentos extra y dibuja una flecha
+por modelo sobre el tablero real:
 
 ```bash
 uv run python scripts/live_chess_fen.py \

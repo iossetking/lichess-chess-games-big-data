@@ -78,6 +78,7 @@ database.lichess.org (.pgn.zst / .jsonl.zst)
 | Script | Función | Hardware ideal | Salida principal |
 |---|---|---|---|
 | `scripts/train_chess_piece_yolo.py` | Exporta `dopaul/chess-pieces-merged` (CC BY 4.0) y entrena `yolo11n` para las 12 clases de piezas físicas | **GPU** (`mps` / CUDA `0`) | `data/models/chess-pieces.pt` |
+| `scripts/generate_screen_template.py` | Genera la plantilla 2D de posición inicial (`800×800`, colores verde/crema) para entrenar el modelo de pantalla | **Local (CPU)** | `data/vision/screen-template.png` |
 | `scripts/train_screen_chess_yoloseg.py` | Genera posiciones sintéticas desde una plantilla 2D y entrena `yolo11n-seg` para tableros en pantalla de celular | **GPU** (`mps` / CUDA `0`) | `data/models/screen-chess-pieces-seg.pt` |
 | `scripts/live_chess_fen.py` | Vista en vivo: cámara → tablero → YOLO → FEN → flechas de los modelos de jugadas | **Local** | Ventanas OpenCV en vivo |
 | `scripts/compact_checkpoints.py` | Convierte checkpoints antiguos a media precisión (`float16`); `--dry-run` solo informa el ahorro | **Local (CPU)** | Checkpoints compactados |
@@ -161,11 +162,12 @@ Los cuadernos se ejecutan sin interfaz y leen sus parámetros desde variables de
    uv run python scripts/train_chess_piece_yolo.py \
      --epochs 50 --device mps --imgsz 640 --batch 16
 
-   # Opcional · tablero 2D en pantalla de celular (YOLO-seg sintético)
+   # Opcional · tablero 2D en pantalla de celular (genera plantilla + YOLO-seg sintético)
+   uv run python scripts/generate_screen_template.py
    uv run python scripts/train_screen_chess_yoloseg.py \
      --epochs 35 --device mps --imgsz 640 --batch 8
    ```
-   *(Cambia `--device mps` por `--device 0` en GPU NVIDIA o `--device cpu` si no tienes GPU).*
+   *(Cambia `--device mps` por `--device 0` en GPU NVIDIA o `--device cpu` si no tienes GPU. Si quieres usar exactamente el estilo visual de tu app móvil, reemplaza `data/vision/screen-template.png` por una captura recortada del tablero inicial antes de entrenar).*
 
 > Los cuadernos `02` y `03` reutilizan `data/processed/*.parquet` y, si faltan, generan una muestra pequeña por su cuenta. Al terminar, pasa a [5. Ejecución local](#5-ejecución-local).
 
@@ -276,10 +278,12 @@ colab download -s lichess-train \
   data/models/chess-pieces.pt
 ```
 
-Si además necesitas reentrenar el modelo YOLO-seg para tablero 2D en pantalla de celular (`screen-chess-pieces-seg.pt`), sube primero tu plantilla local `data/vision/screen-template.png`:
+Si además necesitas reentrenar el modelo YOLO-seg para tablero 2D en pantalla de celular (`screen-chess-pieces-seg.pt`), genera primero `data/vision/screen-template.png` en local (o sustitúyelo por una captura recortada de tu tablero en pantalla) y súbelo a Colab:
 
 ```bash
-# 7b. Opcional · YOLO-seg sintético para pantalla de celular (-> screen-chess-pieces-seg.pt)
+# 7b. Opcional · plantilla 2D + YOLO-seg sintético para pantalla de celular (-> screen-chess-pieces-seg.pt)
+uv run python scripts/generate_screen_template.py
+
 colab exec -s lichess-train --timeout 0 <<'PY'
 !mkdir -p /content/lichess-chess-games-big-data/data/vision
 PY

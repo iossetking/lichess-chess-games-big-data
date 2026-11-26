@@ -109,10 +109,11 @@ def detect_board_corners(frame: np.ndarray) -> np.ndarray | None:
 
 
 def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
-    """Find the green/cream 2D board by its green square regions, quickly.
+    """Find a green/cream 2D board by its green square regions, quickly.
 
     The convex hull of green squares reaches all four outer corners of the
-    alternating grid. This path is intended for the supplied screen template.
+    alternating grid.  Checking each square's outer corners (where pieces do
+    not sit) keeps detection reliable even in crowded middlegame positions.
     """
     import cv2
 
@@ -120,15 +121,15 @@ def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
     scale = min(1.0, 480 / max(height, width))
     small = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    green = cv2.inRange(hsv, (32, 35, 30), (95, 255, 240))
+    green = cv2.inRange(hsv, (33, 38, 30), (95, 255, 240))
     contours, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     eligible = [contour for contour in contours if cv2.contourArea(contour) > small.shape[0] * small.shape[1] * 0.001]
-    if not eligible or sum(cv2.contourArea(contour) for contour in eligible) < small.shape[0] * small.shape[1] * 0.08:
+    if not eligible or sum(cv2.contourArea(contour) for contour in eligible) < small.shape[0] * small.shape[1] * 0.06:
         return None
     hull = cv2.convexHull(np.concatenate(eligible))
     rectangle = cv2.minAreaRect(hull)
     (_, _), (rw, rh), _ = rectangle
-    if min(rw, rh) < min(small.shape[:2]) * 0.25 or max(rw, rh) / min(rw, rh) > 1.8:
+    if min(rw, rh) < min(small.shape[:2]) * 0.22 or max(rw, rh) / min(rw, rh) > 1.8:
         return None
     points = cv2.boxPoints(rectangle)
     sums, differences = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
@@ -138,14 +139,233 @@ def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
     projected = cv2.warpPerspective(green, cv2.getPerspectiveTransform(
         ordered.astype(np.float32), board_destination(320)), (320, 320))
     matches = 0
-    for row in range(2, 6):
+    for row in range(8):
         for col in range(8):
-            patch = projected[row * 40 + 16:row * 40 + 24, col * 40 + 16:col * 40 + 24]
-            is_green = np.mean(patch) > 127
+            y0, x0 = row * 40, col * 40
+            # Sample the four inner-edge corners of each square (pieces sit in the middle).
+            corners_mean = max(
+                float(np.mean(projected[y0 + 3:y0 + 9, x0 + 3:x0 + 9])),
+                float(np.mean(projected[y0 + 3:y0 + 9, x0 + 31:x0 + 37])),
+                float(np.mean(projected[y0 + 31:y0 + 37, x0 + 3:x0 + 9])),
+                float(np.mean(projected[y0 + 31:y0 + 37, x0 + 31:x0 + 37])),
+            )
+            is_green = corners_mean > 127
             matches += is_green == ((row + col) % 2 == 1)
-    if matches < 26:
+    if matches < 50:
         return None
     return (ordered / scale).astype(np.float32)
+
+
+def _find_best_grid_run(profile: np.ndarray, min_step: float, max_step: float) -> tuple[float, float, float] | None:
+    """Locate 7 evenly-spaced internal grid line peaks along a 1D edge profile.
+
+    Returns ``(origin, step, score)`` where ``origin`` is the outer board start
+    coordinate (one cell before the first internal line) and ``step`` is the
+    square side in pixels, or ``None`` if no strong 8x8 periodicity is found.
+    """
+    length = len(profile)
+    if length < 64:
+        return None
+    norm = profile.astype(np.float32)
+    mean, std = float(norm.mean()), float(norm.std())
+    if std < 1e-3:
+        return None
+    norm = np.clip((norm - mean) / std, 0.0, 6.0)
+    # Small smoothing tolerance for 1-2px alignment jitter.
+    kernel = np.array([0.25, 0.5, 1.0, 0.5, 0.25], dtype=np.float32)
+    smooth = np.convolve(norm, kernel, mode="same")
+
+    best: tuple[float, float, float] | None = None
+    step_lo = max(8, int(np.floor(min_step)))
+    step_hi = min(length // 8, int(np.ceil(max_step)))
+    if step_lo > step_hi:
+        return None
+
+    for step_int in range(step_lo, step_hi + 1):
+        step = float(step_int)
+        span = 8.0 * step
+        max_start = int(length - 1 - span)
+        if max_start < 0:
+            continue
+        # Score the 7 internal grid lines plus both outer borders (9 lines total)
+        # so the board cannot shift by one square onto uniform background.
+        inner_offsets = np.arange(1, 8, dtype=np.float32) * step
+        outer_offsets = np.array([0.0, span], dtype=np.float32)
+        starts = np.arange(0, max_start + 1, dtype=np.float32)
+        inner_vals = smooth[np.rint(starts[:, None] + inner_offsets[None, :]).astype(np.int32)]
+        outer_vals = smooth[np.rint(starts[:, None] + outer_offsets[None, :]).astype(np.int32)]
+        scores = inner_vals.mean(axis=1) * 0.5 + inner_vals.min(axis=1) * 0.35 + outer_vals.min(axis=1) * 0.15
+        best_idx = int(np.argmax(scores))
+        score = float(scores[best_idx])
+        if best is None or score > best[2]:
+            best = (float(starts[best_idx]), step, score)
+    return best
+
+
+def _verify_checkerboard_parity(gray_board: np.ndarray) -> float:
+    """Return fraction of 64 squares agreeing with an alternating light/dark grid."""
+    side = gray_board.shape[0] // 8
+    margin = max(2, side // 10)
+    patch = max(3, side // 6)
+    even_vals, odd_vals = [], []
+    cell_vals = np.empty((8, 8), dtype=np.float32)
+    for r in range(8):
+        for c in range(8):
+            y0, x0 = r * side, c * side
+            samples = [
+                float(np.median(gray_board[y0 + margin:y0 + margin + patch, x0 + margin:x0 + margin + patch])),
+                float(np.median(gray_board[y0 + margin:y0 + margin + patch, x0 + side - margin - patch:x0 + side - margin])),
+                float(np.median(gray_board[y0 + side - margin - patch:y0 + side - margin, x0 + margin:x0 + margin + patch])),
+                float(np.median(gray_board[y0 + side - margin - patch:y0 + side - margin, x0 + side - margin - patch:x0 + side - margin])),
+            ]
+            # Use the median of the 4 square corners (robust to piece corners or coordinates).
+            val = float(np.median(samples))
+            cell_vals[r, c] = val
+            if (r + c) % 2 == 0:
+                even_vals.append(val)
+            else:
+                odd_vals.append(val)
+    med_even, med_odd = float(np.median(even_vals)), float(np.median(odd_vals))
+    if abs(med_even - med_odd) < 12.0:
+        return 0.0
+    threshold = 0.5 * (med_even + med_odd)
+    even_is_lighter = med_even > med_odd
+    matches = 0
+    for r in range(8):
+        for c in range(8):
+            is_light = cell_vals[r, c] > threshold
+            expected = even_is_lighter if (r + c) % 2 == 0 else (not even_is_lighter)
+            matches += int(is_light == expected)
+    return matches / 64.0
+
+
+def detect_screen_board_by_grid(frame: np.ndarray) -> np.ndarray | None:
+    """Detect an upright 2D chessboard of *any* colour theme (Lichess, Chess.com, etc.).
+
+    Works on direct screenshots, browser windows, and level webcam views of a
+    screen by locating the 7x7 internal grid edges and confirming alternating
+    square-corner brightness across the 64 squares.
+    """
+    import cv2
+
+    if frame.ndim not in {2, 3}:
+        return None
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    height, width = gray.shape[:2]
+    scale = min(1.0, 640.0 / max(height, width))
+    small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else gray
+    sh, sw = small.shape[:2]
+
+    gx = np.abs(cv2.Sobel(small, cv2.CV_32F, 1, 0, ksize=3))
+    gy = np.abs(cv2.Sobel(small, cv2.CV_32F, 0, 1, ksize=3))
+    # Suppress piece-interior edges slightly by preferring straight continuous lines.
+    x_profile = gx.mean(axis=0)
+    y_profile = gy.mean(axis=1)
+
+    min_step = min(sh, sw) * 0.22 / 8.0
+    max_step = min(sh, sw) / 8.0
+    x_run = _find_best_grid_run(x_profile, min_step, max_step)
+    y_run = _find_best_grid_run(y_profile, min_step, max_step)
+    if x_run is None or y_run is None:
+        return None
+
+    x0, sx, _ = x_run
+    y0, sy, _ = y_run
+    # Refine each axis inside the other axis's band so browser sidebars don't confuse it.
+    ry1, ry2 = max(0, int(y0)), min(sh, int(np.ceil(y0 + 8 * sy)))
+    rx1, rx2 = max(0, int(x0)), min(sw, int(np.ceil(x0 + 8 * sx)))
+    if ry2 - ry1 >= 64 and rx2 - rx1 >= 64:
+        x_refined = _find_best_grid_run(gx[ry1:ry2, :].mean(axis=0), min_step, max_step)
+        y_refined = _find_best_grid_run(gy[:, rx1:rx2].mean(axis=1), min_step, max_step)
+        if x_refined is not None:
+            x0, sx, _ = x_refined
+        if y_refined is not None:
+            y0, sy, _ = y_refined
+
+    if sx <= 0 or sy <= 0 or max(sx, sy) / min(sx, sy) > 1.25:
+        return None
+    x1, y1 = x0 + 8.0 * sx, y0 + 8.0 * sy
+    if x1 > sw + 2 or y1 > sh + 2:
+        return None
+
+    corners_small = np.array(
+        [[x0, y0], [x1 - 1, y0], [x1 - 1, y1 - 1], [x0, y1 - 1]],
+        dtype=np.float32,
+    )
+    warped = cv2.warpPerspective(
+        small, cv2.getPerspectiveTransform(corners_small, board_destination(320)), (320, 320)
+    )
+    if _verify_checkerboard_parity(warped) < 0.78:
+        return None
+    return (corners_small / scale).astype(np.float32)
+
+
+def detect_any_screen_board(frame: np.ndarray) -> np.ndarray | None:
+    """Locate a 2D chessboard on a screen across colour themes and mild tilt."""
+    corners = detect_green_screen_board(frame)
+    if corners is not None:
+        return corners
+    return detect_screen_board_by_grid(frame)
+
+
+def sanitize_fen_castling(fen: str) -> str:
+    """Drop castling flags that are physically impossible for the detected king/rook squares."""
+    parts = fen.split()
+    if len(parts) < 3 or parts[2] == "-":
+        return fen
+    import chess
+
+    try:
+        board = chess.Board(fen)
+    except ValueError:
+        return fen
+    valid_flags = ""
+    if "K" in parts[2] and board.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE) and board.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE):
+        valid_flags += "K"
+    if "Q" in parts[2] and board.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE) and board.piece_at(chess.A1) == chess.Piece(chess.ROOK, chess.WHITE):
+        valid_flags += "Q"
+    if "k" in parts[2] and board.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK) and board.piece_at(chess.H8) == chess.Piece(chess.ROOK, chess.BLACK):
+        valid_flags += "k"
+    if "q" in parts[2] and board.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK) and board.piece_at(chess.A8) == chess.Piece(chess.ROOK, chess.BLACK):
+        valid_flags += "q"
+    parts[2] = valid_flags or "-"
+    return " ".join(parts)
+
+
+def validate_fen_position(fen: str) -> tuple[bool, str]:
+    """Validate a FEN with ``python-chess`` and return ``(is_valid, spanish_reason)``."""
+    import chess
+
+    try:
+        board = chess.Board(fen)
+    except ValueError as error:
+        return False, f"FEN mal formado: {error}"
+    if board.is_valid():
+        return True, "OK"
+
+    status = board.status()
+    reasons: list[str] = []
+    if status & chess.STATUS_NO_WHITE_KING:
+        reasons.append("falta rey blanco")
+    if status & chess.STATUS_NO_BLACK_KING:
+        reasons.append("falta rey negro")
+    if status & chess.STATUS_TOO_MANY_KINGS:
+        reasons.append("mas de un rey del mismo color")
+    if status & chess.STATUS_PAWNS_ON_BACKRANK:
+        reasons.append("peon en fila 1 u 8")
+    if status & chess.STATUS_OPPOSITE_CHECK:
+        reasons.append("rival en jaque (pulsa [t] para cambiar turno)")
+    if status & chess.STATUS_TOO_MANY_WHITE_PAWNS:
+        reasons.append("mas de 8 peones blancos")
+    if status & chess.STATUS_TOO_MANY_BLACK_PAWNS:
+        reasons.append("mas de 8 peones negros")
+    if status & chess.STATUS_TOO_MANY_WHITE_PIECES:
+        reasons.append("demasiadas piezas blancas")
+    if status & chess.STATUS_TOO_MANY_BLACK_PIECES:
+        reasons.append("demasiadas piezas negras")
+    if not reasons:
+        reasons.append("posicion ilegal")
+    return False, "; ".join(reasons)
 
 
 def square_regions(size: int = DEFAULT_BOARD_SIZE) -> dict[str, tuple[int, int, int, int]]:

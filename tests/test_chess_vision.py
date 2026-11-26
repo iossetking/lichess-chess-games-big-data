@@ -8,7 +8,9 @@ from lichess_pipeline.chess_vision import (
     box_iou,
     board_destination,
     crop_piece,
+    detect_any_screen_board,
     detect_green_screen_board,
+    detect_screen_board_by_grid,
     detections_to_fen,
     extrapolate_board_corners,
     fuse_piece_probabilities,
@@ -16,6 +18,7 @@ from lichess_pipeline.chess_vision import (
     piece_description_from_label,
     piece_symbol_from_label,
     square_regions,
+    validate_fen_position,
     validate_ordered_board_corners,
 )
 
@@ -168,3 +171,33 @@ def test_crop_piece_returns_requested_square_size_even_near_borders():
     image = np.full((100, 100, 3), 128, dtype=np.uint8)
     crop = crop_piece(image, (-5, 0, 25, 40), size=160)
     assert crop.shape == (160, 160, 3)
+
+
+def test_detect_screen_board_by_grid_finds_lichess_brown_board_in_browser_frame():
+    frame = np.full((720, 1280, 3), (45, 42, 40), dtype=np.uint8)
+    x0, y0, side = 360, 120, 60
+    for r in range(8):
+        for c in range(8):
+            colour = (181, 217, 240) if (r + c) % 2 == 0 else (99, 136, 181)  # Lichess brown (BGR)
+            frame[y0 + r * side:y0 + (r + 1) * side, x0 + c * side:x0 + (c + 1) * side] = colour
+            # Simulate pieces in the centre of several squares so corners must still work.
+            if r in (0, 1, 3, 4, 6, 7) and c % 2 == 0:
+                cy, cx = y0 + r * side + side // 2, x0 + c * side + side // 2
+                frame[cy - 14:cy + 14, cx - 14:cx + 14] = (30, 30, 30)
+    corners = detect_screen_board_by_grid(frame)
+    assert corners is not None
+    expected = [[x0, y0], [x0 + 8 * side - 1, y0], [x0 + 8 * side - 1, y0 + 8 * side - 1], [x0, y0 + 8 * side - 1]]
+    np.testing.assert_allclose(corners, expected, atol=8)
+    assert detect_any_screen_board(np.zeros_like(frame)) is None
+
+
+def test_validate_fen_position_reports_clear_spanish_diagnostics():
+    ok, reason = validate_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    assert ok and reason == "OK"
+
+    ok, reason = validate_fen_position("8/8/8/8/8/8/8/4K3 w - - 0 1")
+    assert not ok and "rey negro" in reason
+
+    # Black king in check while it is White's turn -> wrong turn hint
+    ok, reason = validate_fen_position("4k3/4Q3/8/8/8/8/8/4K3 w - - 0 1")
+    assert not ok and "[t]" in reason

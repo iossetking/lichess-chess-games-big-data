@@ -111,9 +111,10 @@ def detect_board_corners(frame: np.ndarray) -> np.ndarray | None:
 def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
     """Find a green/cream 2D board by its green square regions, quickly.
 
-    The convex hull of green squares reaches all four outer corners of the
-    alternating grid.  Checking each square's outer corners (where pieces do
-    not sit) keeps detection reliable even in crowded middlegame positions.
+    Filters out non-square UI elements (such as Chess.com's green sidebar
+    buttons) by keeping only square-like tiles of consistent area before
+    building the convex hull, then verifies checkerboard parity at each
+    square's four inner corners so pieces in the middle do not break detection.
     """
     import cv2
 
@@ -123,37 +124,66 @@ def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     green = cv2.inRange(hsv, (33, 38, 30), (95, 255, 240))
     contours, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    eligible = [contour for contour in contours if cv2.contourArea(contour) > small.shape[0] * small.shape[1] * 0.001]
-    if not eligible or sum(cv2.contourArea(contour) for contour in eligible) < small.shape[0] * small.shape[1] * 0.06:
+    frame_area = float(small.shape[0] * small.shape[1])
+    min_tile = frame_area * 0.0004
+    raw_eligible = [c for c in contours if cv2.contourArea(c) > min_tile]
+    if not raw_eligible:
         return None
-    hull = cv2.convexHull(np.concatenate(eligible))
-    rectangle = cv2.minAreaRect(hull)
-    (_, _), (rw, rh), _ = rectangle
-    if min(rw, rh) < min(small.shape[:2]) * 0.22 or max(rw, rh) / min(rw, rh) > 1.8:
-        return None
-    points = cv2.boxPoints(rectangle)
-    sums, differences = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
-    ordered = points[[np.argmin(sums), np.argmin(differences), np.argmax(sums), np.argmax(differences)]]
-    if len(np.unique(ordered, axis=0)) != 4:
-        return None
-    projected = cv2.warpPerspective(green, cv2.getPerspectiveTransform(
-        ordered.astype(np.float32), board_destination(320)), (320, 320))
-    matches = 0
-    for row in range(8):
-        for col in range(8):
-            y0, x0 = row * 40, col * 40
-            # Sample the four inner-edge corners of each square (pieces sit in the middle).
-            corners_mean = max(
-                float(np.mean(projected[y0 + 3:y0 + 9, x0 + 3:x0 + 9])),
-                float(np.mean(projected[y0 + 3:y0 + 9, x0 + 31:x0 + 37])),
-                float(np.mean(projected[y0 + 31:y0 + 37, x0 + 3:x0 + 9])),
-                float(np.mean(projected[y0 + 31:y0 + 37, x0 + 31:x0 + 37])),
-            )
-            is_green = corners_mean > 127
-            matches += is_green == ((row + col) % 2 == 1)
-    if matches < 50:
-        return None
-    return (ordered / scale).astype(np.float32)
+
+    def _try_contours(group: list[np.ndarray]) -> np.ndarray | None:
+        if not group or sum(cv2.contourArea(c) for c in group) < frame_area * 0.025:
+            return None
+        hull = cv2.convexHull(np.concatenate(group))
+        rectangle = cv2.minAreaRect(hull)
+        (_, _), (rw, rh), _ = rectangle
+        if min(rw, rh) < min(small.shape[:2]) * 0.20 or max(rw, rh) / min(rw, rh) > 1.8:
+            return None
+        points = cv2.boxPoints(rectangle)
+        sums, differences = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
+        ordered = points[[np.argmin(sums), np.argmin(differences), np.argmax(sums), np.argmax(differences)]]
+        if len(np.unique(ordered, axis=0)) != 4:
+            return None
+        projected = cv2.warpPerspective(
+            green, cv2.getPerspectiveTransform(ordered.astype(np.float32), board_destination(320)), (320, 320)
+        )
+        matches = 0
+        for row in range(8):
+            for col in range(8):
+                y0, x0 = row * 40, col * 40
+                corners_mean = max(
+                    float(np.mean(projected[y0 + 3:y0 + 9, x0 + 3:x0 + 9])),
+                    float(np.mean(projected[y0 + 3:y0 + 9, x0 + 31:x0 + 37])),
+                    float(np.mean(projected[y0 + 31:y0 + 37, x0 + 3:x0 + 9])),
+                    float(np.mean(projected[y0 + 31:y0 + 37, x0 + 31:x0 + 37])),
+                )
+                is_green = corners_mean > 127
+                matches += is_green == ((row + col) % 2 == 1)
+        if matches < 50:
+            return None
+        return (ordered / scale).astype(np.float32)
+
+    # 1. Try each large square-like connected component alone first (an 8-connected board
+    #    touches diagonally into one component, so this ignores separate green UI buttons).
+    square_like = [
+        c for c in raw_eligible
+        if (lambda _, __, w, h: w > 0 and h > 0 and 0.55 <= (w / h) <= 1.8)(*cv2.boundingRect(c))
+    ]
+    for contour in sorted(square_like, key=cv2.contourArea, reverse=True)[:5]:
+        result = _try_contours([contour])
+        if result is not None:
+            return result
+
+    # 2. If pieces split the green squares into separate tiles, combine square-like tiles
+    #    of consistent area (filtering out wide UI buttons), then fall back to all eligible.
+    if len(square_like) >= 4:
+        areas = np.array([cv2.contourArea(c) for c in square_like], dtype=np.float32)
+        median_area = float(np.median(areas))
+        consistent = [c for c, a in zip(square_like, areas) if 0.30 * median_area <= a <= 2.4 * median_area]
+        for group in (consistent, square_like):
+            result = _try_contours(group)
+            if result is not None:
+                return result
+    return _try_contours(raw_eligible)
 
 
 def _find_best_grid_run(profile: np.ndarray, min_step: float, max_step: float) -> tuple[float, float, float] | None:

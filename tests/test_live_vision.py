@@ -308,3 +308,30 @@ def test_full_frame_is_board_mode_uses_entire_cropped_capture():
     worker._run()
     assert seen == [(800, 800, 3)]
     assert worker.fen_valid is True
+
+
+def test_auto_detect_screen_board_region_masks_own_window_and_scales_retina():
+    # Simulated 2x Retina screenshot (2880x1800) with a board on the left and a fake green box on top-right
+    full = np.full((1800, 2880, 3), (36, 36, 36), dtype=np.uint8)
+    x0, y0, side = 240, 200, 140  # logical (120, 100, 560, 560)
+    for r in range(8):
+        for c in range(8):
+            colour = (208, 236, 235) if (r + c) % 2 == 0 else (86, 149, 119)
+            full[y0 + r * side:y0 + (r + 1) * side, x0 + c * side:x0 + (c + 1) * side] = colour
+    # Assistant waiting card in logical top-right (1000, 44, 420, 195)
+    region, logical_size = live.auto_detect_screen_board_region(
+        screen_scale=2.0,
+        ignore_logical_rect=(1000, 44, 420, 195),
+        full_frame=full,
+    )
+    assert logical_size == (1440, 900)
+    assert region is not None
+    np.testing.assert_allclose(region, (120, 100, 560, 560), atol=12)
+
+    # If the ignore rect covers the board itself, auto-detection must ignore it and return None.
+    masked_region, _ = live.auto_detect_screen_board_region(
+        screen_scale=2.0,
+        ignore_logical_rect=(100, 80, 600, 600),
+        full_frame=full,
+    )
+    assert masked_region is None

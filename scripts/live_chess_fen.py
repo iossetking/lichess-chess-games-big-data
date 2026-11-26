@@ -148,6 +148,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional screen crop for --source screen as x,y,w,h (e.g. 100,120,800,800)",
     )
     parser.add_argument(
+        "--manual-select",
+        action="store_true",
+        help="With --source screen, open the manual drag-rectangle selector instead of auto-detecting the board",
+    )
+    parser.add_argument(
         "--weights",
         type=Path,
         default=None,
@@ -441,6 +446,59 @@ def corners_to_logical_region(
     lw = max(32, int(round((x2 - x1) / scale)))
     lh = max(32, int(round((y2 - y1) / scale)))
     return lx, ly, lw, lh
+
+
+def auto_detect_screen_board_region(
+    screen_scale: float,
+    ignore_logical_rect: tuple[int, int, int, int] | None = None,
+    *,
+    full_frame: np.ndarray | None = None,
+) -> tuple[tuple[int, int, int, int] | None, tuple[int, int]]:
+    """Automatically find a 2D chessboard anywhere on the monitor (zero clicks).
+
+    When ``ignore_logical_rect`` ``(x, y, w, h)`` is provided, that rectangle
+    (with padding for macOS window chrome/shadow) is masked out before detection
+    so the assistant window can never detect itself.
+    """
+    full = full_frame if full_frame is not None else _grab_screen_bgr(None)
+    if full is None:
+        return None, (1440, 900)
+    scale = max(float(screen_scale), 1e-3)
+    fh, fw = full.shape[:2]
+    logical_screen = (
+        max(640, int(round(fw / scale))),
+        max(480, int(round(fh / scale))),
+    )
+    probe = full.copy()
+    if ignore_logical_rect is not None:
+        ix, iy, iw, ih = ignore_logical_rect
+        pad = 36
+        px1 = max(0, int(round((ix - pad) * scale)))
+        py1 = max(0, int(round((iy - pad) * scale)))
+        px2 = min(fw, int(round((ix + iw + pad) * scale)))
+        py2 = min(fh, int(round((iy + ih + pad) * scale)))
+        if px2 > px1 and py2 > py1:
+            probe[py1:py2, px1:px2] = 0
+    corners = detect_any_screen_board(probe)
+    if corners is None:
+        return None, logical_screen
+    return corners_to_logical_region(corners, scale), logical_screen
+
+
+def _render_searching_card(tick: int) -> np.ndarray:
+    """Compact corner status card shown while auto-detecting a board on screen."""
+    w, h = 420, 195
+    card = np.full((h, w, 3), (24, 27, 32), dtype=np.uint8)
+    cv2.rectangle(card, (0, 0), (w - 1, h - 1), (65, 195, 115), 2)
+    cv2.putText(card, "AJEDREZ EN VIVO · MODO AUTOMATICO", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (240, 244, 248), 2, cv2.LINE_AA)
+    cv2.line(card, (16, 44), (w - 16, 44), (65, 72, 84), 1)
+    dots = "." * ((tick % 3) + 1)
+    cv2.putText(card, f"Buscando tablero en tu pantalla{dots}", (16, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (90, 245, 160), 1, cv2.LINE_AA)
+    cv2.putText(card, "Deja visible Chess.com o Lichess en pantalla.", (16, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (210, 215, 224), 1, cv2.LINE_AA)
+    cv2.putText(card, "Arranca solo al detectarlo (sin recuadro manual).", (16, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (175, 185, 200), 1, cv2.LINE_AA)
+    cv2.line(card, (16, 152), (w - 16, 152), (65, 72, 84), 1)
+    cv2.putText(card, "[c] Elegir a mano      [q / Esc] Salir", (16, 178), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 210, 225), 1, cv2.LINE_AA)
+    return card
 
 
 def _close_window(name: str) -> None:
@@ -1610,55 +1668,127 @@ def main() -> int:
         screen_scale = _detect_screen_scale()
         logical_screen = (1440, 900)
         if region is None:
-            print("Deja visible tu tablero (Chess.com / Lichess), pulsa Enter si sale en verde o arrastra un cuadro...")
-            picked = select_screen_board_region(screen_scale)
-            if picked is None:
-                print("Seleccion cancelada.")
-                return 0
-            region, logical_screen = picked
-            print(f"Zona de tablero seleccionada: --screen-region {region[0]},{region[1]},{region[2]},{region[3]}")
+            if args.manual_select:
+                print("Modo seleccion manual: arrastra un cuadro sobre el tablero y pulsa Enter...")
+                picked = select_screen_board_region(screen_scale)
+                if picked is None:
+                    print("Seleccion cancelada.")
+                    return 0
+                region, logical_screen = picked
+            else:
+                print("Buscando tablero automaticamente en tu pantalla (sin recuadro manual)...")
+                region, logical_screen = auto_detect_screen_board_region(screen_scale)
+                if region is not None:
+                    print(
+                        f"Tablero detectado automaticamente: --screen-region "
+                        f"{region[0]},{region[1]},{region[2]},{region[3]}"
+                    )
         else:
-            full_probe = _grab_screen_bgr(None)
-            if full_probe is not None:
-                logical_screen = (
-                    max(640, int(round(full_probe.shape[1] / max(screen_scale, 1e-3)))),
-                    max(480, int(round(full_probe.shape[0] / max(screen_scale, 1e-3)))),
-                )
+            _, logical_screen = auto_detect_screen_board_region(screen_scale)
 
         args.full_frame_is_board = True
-        source_feed: Any = LatestScreenFrame(region=region)
-        if not source_feed.is_opened():
-            print("No se pudo capturar la pantalla. Verifica permisos de Grabacion de Pantalla en macOS.", file=sys.stderr)
-            return 1
-        source_feed.start()
-        inference = LiveInference(source_feed, pieces, board_segmenter, policies, args)
-        inference.manual_locked = True
-        inference.start()
-
-        # Compact vertical layout by default so it fits beside Chess.com/Lichess without covering the board!
+        assistant_win = "Chess Assistant | 5 Modelos"
         compact_mode = True
         compact_size = (440, 820)
         wide_size = (960, 655)
+        search_size = (420, 195)
 
-        assistant_win = "Chess Assistant | 5 Modelos"
+        source_feed: Any = None
+        inference: LiveInference | None = None
+        card_rect: tuple[int, int, int, int] | None = None
+
+        def start_tracking(board_region: tuple[int, int, int, int]) -> bool:
+            nonlocal source_feed, inference, card_rect
+            if inference is not None:
+                inference.stop()
+                inference = None
+            if source_feed is not None:
+                source_feed.release()
+                source_feed = None
+            feed = LatestScreenFrame(region=board_region)
+            if not feed.is_opened():
+                print("No se pudo capturar la pantalla. Verifica permisos de Grabacion de Pantalla en macOS.", file=sys.stderr)
+                return False
+            feed.start()
+            worker = LiveInference(feed, pieces, board_segmenter, policies, args)
+            worker.manual_locked = True
+            worker.start()
+            source_feed = feed
+            inference = worker
+            win_w, win_h = compact_size if compact_mode else wide_size
+            wx, wy = compute_assistant_window_pos(board_region, logical_screen, (win_w, win_h))
+            cv2.resizeWindow(assistant_win, win_w, win_h)
+            cv2.moveWindow(assistant_win, wx, wy)
+            card_rect = (wx, wy, win_w, win_h)
+            print(
+                f"Asistente activo en ({wx}, {wy}) al lado del tablero "
+                f"(--screen-region {board_region[0]},{board_region[1]},{board_region[2]},{board_region[3]}).\n"
+                "Teclas: [r] auto-redetectar | [c] elegir a mano | [v] vista | [t] turno | "
+                "[f] girar (negras) | [k] enroque | [m] mascaras | [0/1-5] modelos | [s] guardar | [q/Esc] salir."
+            )
+            return True
+
+        def enter_searching_mode() -> None:
+            nonlocal source_feed, inference, region, card_rect
+            if inference is not None:
+                inference.stop()
+                inference = None
+            if source_feed is not None:
+                source_feed.release()
+                source_feed = None
+            region = None
+            sw, _ = logical_screen
+            wx = max(16, sw - search_size[0] - 20)
+            wy = 44
+            cv2.resizeWindow(assistant_win, search_size[0], search_size[1])
+            cv2.moveWindow(assistant_win, wx, wy)
+            card_rect = (wx, wy, search_size[0], search_size[1])
+
         cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
-        win_w, win_h = compact_size
-        wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
-        cv2.resizeWindow(assistant_win, win_w, win_h)
-        cv2.moveWindow(assistant_win, wx, wy)
-        print(
-            f"Asistente de pantalla listo en ({wx}, {wy}) fuera de tu tablero.\n"
-            "IMPORTANTE: NO pongas esta ventana encima del tablero de ajedrez.\n"
-            "Teclas: [c] cambiar zona | [v] vista compacta/ancha | [t] turno | [f] girar (negras) | "
-            "[k] enroque | [m] mascaras | [0/1-5] modelos | [s] guardar | [q/Esc] salir."
-        )
+        if region is not None:
+            if not start_tracking(region):
+                _close_window(assistant_win)
+                return 1
+        else:
+            enter_searching_mode()
+
+        next_auto_scan = 0.0
+        scan_tick = 0
         try:
             while True:
+                if region is None or inference is None:
+                    now = perf_counter()
+                    cv2.imshow(assistant_win, _render_searching_card(scan_tick))
+                    if now >= next_auto_scan:
+                        next_auto_scan = now + 0.65
+                        scan_tick += 1
+                        found, logical_screen = auto_detect_screen_board_region(
+                            screen_scale, ignore_logical_rect=card_rect
+                        )
+                        if found is not None:
+                            region = found
+                            if not start_tracking(region):
+                                return 1
+                            continue
+                    key = cv2.waitKey(40) & 0xFF
+                    if key in (27, ord("q")):
+                        return 0
+                    if key == ord("c"):
+                        _close_window(assistant_win)
+                        picked = select_screen_board_region(screen_scale)
+                        cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
+                        if picked is not None:
+                            region, logical_screen = picked
+                            if not start_tracking(region):
+                                return 1
+                        else:
+                            enter_searching_mode()
+                    continue
+
                 snap = inference.state()
                 board_vis = snap["board_image"]
                 if board_vis is not None:
                     if compact_mode and board_vis.shape[1] == args.size + 370:
-                        # Stack clear rectified board (480x480) above the telemetry sidebar + hotkey bar.
                         col_w = 480
                         board_part = cv2.resize(board_vis[:, :args.size], (col_w, col_w), interpolation=cv2.INTER_AREA)
                         panel_crop = board_vis[:500, args.size:]
@@ -1666,12 +1796,13 @@ def main() -> int:
                         panel_part = cv2.resize(panel_crop, (col_w, panel_h), interpolation=cv2.INTER_AREA)
                         footer = np.full((46, col_w, 3), (22, 24, 28), dtype=np.uint8)
                         cv2.line(footer, (12, 2), (col_w - 12, 2), (70, 75, 85), 1)
-                        cv2.putText(footer, "[c] Zona   [v] Vista   [t] Turno   [f] Girar", (14, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (185, 195, 210), 1, cv2.LINE_AA)
-                        cv2.putText(footer, "[0/1-5] Modelos   [m] Mascaras   [q] Salir", (14, 39), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (185, 195, 210), 1, cv2.LINE_AA)
+                        cv2.putText(footer, "[r] Auto-tablero  [c] Manual  [v] Vista  [t] Turno", (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (185, 195, 210), 1, cv2.LINE_AA)
+                        cv2.putText(footer, "[f] Girar  [0/1-5] Modelos  [m] Mascaras  [q] Salir", (12, 39), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (185, 195, 210), 1, cv2.LINE_AA)
                         display_img = np.vstack([board_part, panel_part, footer])
                     else:
                         display_img = board_vis
                     cv2.imshow(assistant_win, display_img)
+
                 key = cv2.waitKey(20) & 0xFF
                 if key in (27, ord("q")):
                     return 0
@@ -1681,24 +1812,35 @@ def main() -> int:
                     wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
                     cv2.resizeWindow(assistant_win, win_w, win_h)
                     cv2.moveWindow(assistant_win, wx, wy)
+                    card_rect = (wx, wy, win_w, win_h)
+                    continue
+                if key == ord("r"):
+                    # Auto re-detect board anywhere on screen without manual box!
+                    _close_window(assistant_win)
+                    found, logical_screen = auto_detect_screen_board_region(screen_scale)
+                    cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
+                    if found is not None:
+                        region = found
+                        if not start_tracking(region):
+                            return 1
+                    else:
+                        print("No se encontro tablero; esperando a que aparezca Chess.com / Lichess...")
+                        enter_searching_mode()
                     continue
                 if key == ord("c"):
                     _close_window(assistant_win)
                     picked = select_screen_board_region(screen_scale)
+                    cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
                     if picked is not None:
                         region, logical_screen = picked
-                        source_feed.set_region(region)
-                        inference.control(ord("r"))
-                        inference.manual_locked = True
-                        print(
-                            f"Nueva zona seleccionada: --screen-region "
-                            f"{region[0]},{region[1]},{region[2]},{region[3]}"
-                        )
-                    cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
-                    win_w, win_h = compact_size if compact_mode else wide_size
-                    wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
-                    cv2.resizeWindow(assistant_win, win_w, win_h)
-                    cv2.moveWindow(assistant_win, wx, wy)
+                        if not start_tracking(region):
+                            return 1
+                    elif region is not None:
+                        win_w, win_h = compact_size if compact_mode else wide_size
+                        wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
+                        cv2.resizeWindow(assistant_win, win_w, win_h)
+                        cv2.moveWindow(assistant_win, wx, wy)
+                        card_rect = (wx, wy, win_w, win_h)
                     continue
                 if key == ord("s") and board_vis is not None:
                     snap_dir = PROJECT_ROOT / "data" / "snapshots"
@@ -1711,8 +1853,10 @@ def main() -> int:
                 if key in (ord("t"), ord("f"), ord("k"), ord("m"), ord("0")) or (ord("1") <= key <= ord("9")):
                     inference.control(key)
         finally:
-            inference.stop()
-            source_feed.release()
+            if inference is not None:
+                inference.stop()
+            if source_feed is not None:
+                source_feed.release()
             cv2.destroyAllWindows()
 
     source_feed = LatestFrameCamera(args.camera)

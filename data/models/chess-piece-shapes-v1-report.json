@@ -1,0 +1,65 @@
+{
+  "counts": {
+    "test/3d": 20,
+    "test/2d": 50,
+    "valid/3d": 62,
+    "valid/2d": 50,
+    "train/3d": 281,
+    "train/2d": 250
+  },
+  "exact_duplicates_removed": 0,
+  "unlabelled_images_excluded": 0,
+  "sources": [
+    "chess-pieces-merged",
+    "screen-chess-seg"
+  ],
+  "seed": 42,
+  "excluded_source": "chess-pieces-roboflow: local labels are all empty despite visible pieces",
+  "limitations": "2D uses one sprite style; physical sources may contain near duplicates not caught by exact pixel hashing.",
+  "weights": "data/models/chess-piece-shapes.pt",
+  "evaluation": {
+    "2d": {
+      "metrics/precision(B)": 0.9995494346296683,
+      "metrics/recall(B)": 1.0,
+      "metrics/mAP50(B)": 0.995,
+      "metrics/mAP50-95(B)": 0.9940797505868432,
+      "fitness": 0.9940797505868432,
+      "speed_ms": {
+        "preprocess": 0.16932498016103636,
+        "inference": 4.622766639949987,
+        "loss": 5.1660099416039884e-05,
+        "postprocess": 3.805081679893192
+      }
+    },
+    "3d": {
+      "metrics/precision(B)": 0.9145452260401545,
+      "metrics/recall(B)": 0.6390686639611675,
+      "metrics/mAP50(B)": 0.7253216506690542,
+      "metrics/mAP50-95(B)": 0.5445608890224958,
+      "fitness": 0.5445608890224958,
+      "speed_ms": {
+        "preprocess": 0.31004574993858114,
+        "inference": 10.101227099949028,
+        "loss": 7.495000318158418e-05,
+        "postprocess": 3.68738540000777
+      }
+    }
+  },
+  "single_image_latency_ms": {
+    "median": 7.417541499307845,
+    "p95": 8.037187500667642,
+    "device": "mps",
+    "imgsz": 512,
+    "note": "Repeated still image; excludes camera and UI."
+  },
+  "training": {
+    "completed_epochs": 30,
+    "best_epoch": 30,
+    "imgsz": 512,
+    "batch": 8,
+    "device": "mps",
+    "initial_weights": "data/models/chess-piece-shapes-initial.pt",
+    "run_directory": "data/runs/vision/mixed-chess-shapes-clean"
+  },
+  "weights_sha256": "575d29e133b1c92259c70d3900eb6b75bdfb604ecc338a148270a3ab65ff288e"
+}

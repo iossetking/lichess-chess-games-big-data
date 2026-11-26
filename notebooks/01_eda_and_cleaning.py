@@ -8,6 +8,7 @@ app = marimo.App(width="medium")
 def _():
     import os
     import sys
+    from collections.abc import Sequence as _Sequence
     from pathlib import Path
 
     def _project_dir() -> Path:
@@ -79,6 +80,81 @@ def _():
         year, number = month
         return f"{year}-{number:02d}"
 
+    _BYTES_PER_MB = 1024**2
+    _BYTES_PER_GB = 1024**3
+    _BYTES_PER_TB = 1024**4
+
+    def _size_row(label: str, size_bytes: int) -> dict[str, str]:
+        return {
+            "Archivo": label,
+            "MB": f"{size_bytes / _BYTES_PER_MB:,.2f}",
+            "GB": f"{size_bytes / _BYTES_PER_GB:,.6f}",
+            "TB": f"{size_bytes / _BYTES_PER_TB:,.9f}",
+        }
+
+    def dataset_sizes_df(
+        paths: Path | str | _Sequence[Path | str],
+        *,
+        show_individual: bool = True,
+        total_label: str = "Total",
+    ) -> pl.DataFrame:
+        """Return file/dataset sizes in MB, GB and TB as a Polars DataFrame.
+
+        When ``show_individual`` is False and multiple files are given, only a
+        single combined sum row is returned. When ``show_individual`` is True
+        and multiple files are given, every file is listed followed by a total
+        row with the sum of all of them.
+        """
+        if isinstance(paths, (str, Path)):
+            resolved = [Path(paths)]
+        else:
+            resolved = [Path(path) for path in paths]
+        if not resolved:
+            return pl.DataFrame(
+                schema={
+                    "Archivo": pl.String(),
+                    "MB": pl.String(),
+                    "GB": pl.String(),
+                    "TB": pl.String(),
+                }
+            )
+        sizes = [(path.name, path.stat().st_size) for path in resolved]
+        total_bytes = sum(size for _name, size in sizes)
+        if len(sizes) == 1:
+            name, size = sizes[0]
+            rows = [_size_row(name, size)]
+        elif show_individual:
+            rows = [_size_row(name, size) for name, size in sizes]
+            rows.append(_size_row(total_label, total_bytes))
+        else:
+            rows = [_size_row(f"{total_label} ({len(sizes)} archivos)", total_bytes)]
+        return pl.DataFrame(rows)
+
+    def display_dataset_sizes(
+        paths: Path | str | _Sequence[Path | str],
+        *,
+        title: str | None = None,
+        show_individual: bool = True,
+        total_label: str = "Total",
+    ):
+        """Display file/dataset sizes in MB, GB and TB in marimo."""
+        table = dataset_sizes_df(
+            paths,
+            show_individual=show_individual,
+            total_label=total_label,
+        )
+        if table.is_empty():
+            heading = f"**{title}:** " if title else ""
+            return mo.callout(
+                mo.md(f"{heading}no hay archivos guardados para medir."),
+                kind="warn",
+            )
+        blocks = []
+        if title:
+            blocks.append(mo.md(f"### {title}"))
+        blocks.append(mo.ui.table(table, pagination=False))
+        return mo.vstack(blocks)
+
     return (
         LichessConnectionError,
         RAW_DIR,
@@ -86,6 +162,8 @@ def _():
         assumed_game_months,
         available_game_months,
         clean_games_df,
+        dataset_sizes_df,
+        display_dataset_sizes,
         download_to_disk,
         evals_url,
         extract_positions_df,
@@ -550,6 +628,7 @@ def _(
 def _(
     LichessConnectionError,
     RAW_DIR,
+    display_dataset_sizes,
     download_to_disk,
     games_sample_url,
     keep_raw,
@@ -587,15 +666,21 @@ def _(
                 )
             except LichessConnectionError as exc:
                 _failures.append(f"`{_label}`: {exc}")
-    message = (
-        f"Guardados **{len(saved_paths)}** prefijos de ~{budget / 1_000_000:.1f} MB "
-        f"({budget * len(saved_paths) / 1_000_000:.0f} MB en total) en `{RAW_DIR}`."
-    )
+    message = f"Guardados **{len(saved_paths)}** archivo(s) en `{RAW_DIR}`."
     if saved_paths:
         message += "\n\n" + "\n".join(f"- `{path.name}`" for path in saved_paths)
     if _failures:
         message += "\n\nFallaron:\n" + "\n".join(f"- {failure}" for failure in _failures)
-    mo.md(message)
+    _blocks = [mo.md(message)]
+    if saved_paths:
+        _blocks.append(
+            display_dataset_sizes(
+                saved_paths,
+                title="Tamaño de los archivos raw descargados",
+                show_individual=False,
+            )
+        )
+    mo.vstack(_blocks)
     return
 
 
@@ -774,7 +859,7 @@ def _(extract_positions_df, games_clean, max_positions, mo, save_frame):
             mo.ui.table(positions.head(5), pagination=False),
         ]
     )
-    return
+    return games_path, positions_path
 
 
 @app.cell
@@ -911,6 +996,16 @@ def _(evals_clean, mo, save_frame):
             ),
             mo.ui.table(evals_clean.head(5), pagination=False),
         ]
+    )
+    return (evals_path,)
+
+
+@app.cell
+def _(display_dataset_sizes, evals_path, games_path, positions_path):
+    display_dataset_sizes(
+        [games_path, positions_path, evals_path],
+        title="Tamaño de los archivos procesados tras la limpieza",
+        show_individual=True,
     )
     return
 

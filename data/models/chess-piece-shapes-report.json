@@ -1,0 +1,74 @@
+{
+  "counts": {
+    "test/3d": 20,
+    "test/2d": 50,
+    "valid/3d": 61,
+    "valid/2d": 50,
+    "train/3d": 273,
+    "train/2d": 250
+  },
+  "exact_duplicates_removed": 0,
+  "unlabelled_images_excluded": 0,
+  "sources": [
+    "chess-pieces-merged",
+    "screen-chess-seg"
+  ],
+  "seed": 42,
+  "orientation_fixed": {
+    "ccw": 47,
+    "cw": 17
+  },
+  "dropped_unusable_labels": [
+    "valid/chess-pieces-merged-000017 (best=ccw, score=0.38)",
+    "train/chess-pieces-merged-000052 (best=cw, score=0.15)",
+    "train/chess-pieces-merged-000060 (best=0, score=0.35)",
+    "train/chess-pieces-merged-000114 (best=cw, score=0.47)",
+    "train/chess-pieces-merged-000128 (best=0, score=0.07)",
+    "train/chess-pieces-merged-000203 (best=180, score=0.15)",
+    "train/chess-pieces-merged-000230 (best=0, score=0.14)",
+    "train/chess-pieces-merged-000262 (best=180, score=0.08)",
+    "train/chess-pieces-merged-000263 (best=0, score=0.07)"
+  ],
+  "reference_weights": "data/models/chess-piece-shapes-v1.pt",
+  "excluded_source": "chess-pieces-roboflow: local labels are all empty despite visible pieces",
+  "weights": "data/models/chess-piece-shapes-v2.pt",
+  "base_model": "data/models/yolo11s.pt",
+  "training_args": {
+    "epochs": "80",
+    "imgsz": "640",
+    "batch": "16",
+    "device": "mps",
+    "model": "/Users/rodrigocastillo/Documents/CUGDsexo/lichess-chess-games-big-data/data/models/yolo11s.pt",
+    "reference": "/Users/rodrigocastillo/Documents/CUGDsexo/lichess-chess-games-big-data/data/models/chess-piece-shapes-v1.pt",
+    "cls": "1.0",
+    "name": "shapes-v2",
+    "output": "/Users/rodrigocastillo/Documents/CUGDsexo/lichess-chess-games-big-data/data/models/chess-piece-shapes-v2.pt",
+    "prepare_only": "False",
+    "skip_prepare": "True",
+    "resume": "True"
+  },
+  "training_minutes": 49.04495565139999,
+  "run_directory": "data/runs/vision/shapes-v2",
+  "evaluation": {
+    "2d": {
+      "metrics/precision(B)": 0.9995726208922502,
+      "metrics/recall(B)": 1.0,
+      "metrics/mAP50(B)": 0.995,
+      "metrics/mAP50-95(B)": 0.9949999999999998,
+      "fitness": 0.9949999999999998
+    },
+    "3d": {
+      "metrics/precision(B)": 0.9214694139432101,
+      "metrics/recall(B)": 0.9690842727720863,
+      "metrics/mAP50(B)": 0.9664681837485948,
+      "metrics/mAP50-95(B)": 0.7550271710520059,
+      "fitness": 0.7550271710520059
+    }
+  },
+  "single_image_latency_ms": {
+    "median": 43.82856249867473,
+    "p95": 45.790139547534636,
+    "device": "mps",
+    "imgsz": 640
+  }
+}

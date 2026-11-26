@@ -345,3 +345,109 @@ def test_live_inference_cleans_impossible_castling_and_repairs_duplicate_king():
     assert "Q" in worker.fen.split()[0]  # extra king repaired to queen
     assert len(worker.results) == 1
     assert worker.results[0]["label"] == "Maia-SF"
+
+
+def test_screen_mode_rectifies_board_before_yolo_and_draws_analysis():
+    frame = np.full((720, 1280, 3), 50, dtype=np.uint8)
+    camera = SimpleNamespace(sample=lambda: (frame.copy(), 1, live.perf_counter()))
+    args = SimpleNamespace(
+        size=800,
+        turn="w",
+        flip=False,
+        stable_frames=1,
+        redetect_every=0,
+        confidence=0.25,
+        imgsz=640,
+        scene="2d",
+        mode="screen",
+        castling="KQkq",
+        en_passant="-",
+        screen_board=True,
+        smooth=0.0,
+    )
+    seen_shapes = []
+    policies = [live.PolicyStyle("Maia-SF", (235, 80, 235), FakePolicy(0.62))]
+
+    def detect(image, *args):
+        seen_shapes.append(image.shape)
+        worker._stop.set()
+        mask = np.array([[410, 710], [490, 710], [490, 790], [410, 790]], dtype=np.int32)
+        return [
+            PieceDetection("white-king", 0.99, (410, 710, 490, 790), mask),
+            PieceDetection("white-pawn", 0.96, (410, 610, 490, 690), mask),
+            PieceDetection("black-king", 0.99, (410, 10, 490, 90), mask),
+        ]
+
+    worker = live.LiveInference(camera, SimpleNamespace(detect=detect, is_segmentation=True), None, policies, args)
+    worker.set_manual_corners(np.array([[300, 100], [900, 100], [900, 700], [300, 700]], dtype=np.float32))
+    worker._run()
+
+    # YOLO must receive the 800x800 rectified board, NOT the raw 720x1280 camera frame.
+    assert seen_shapes == [(800, 800, 3)]
+    assert worker.fen_valid is True
+    assert len(worker.results) == 1
+    assert worker.results[0]["label"] == "Maia-SF"
+    assert worker.board_image is not None
+    # Board (800) + right-hand telemetry sidebar (370)
+    assert worker.board_image.shape == (800, 1170, 3)
+
+
+def test_live_inference_controls_cycle_castling_masks_and_model_focus():
+    args = SimpleNamespace(
+        size=800, turn="w", flip=False, stable_frames=2, redetect_every=0,
+        confidence=0.25, imgsz=640, scene="2d", castling="KQkq", en_passant="-",
+        screen_board=True, smooth=0.0,
+    )
+    policies = [
+        live.PolicyStyle("Scratch", (255, 255, 0), FakePolicy(0.4)),
+        live.PolicyStyle("Maia-SF", (235, 80, 235), FakePolicy(0.6)),
+    ]
+    worker = live.LiveInference(None, SimpleNamespace(), None, policies, args)
+    worker.control(ord("k"))
+    assert worker.castling == "KQ"
+    worker.control(ord("m"))
+    assert worker.show_masks is False
+    worker.control(ord("2"))
+    assert worker.active_model_idx == 1
+    worker.control(ord("0"))
+    assert worker.active_model_idx is None
+
+
+def test_corners_to_logical_region_scales_retina_coordinates():
+    corners = np.array([[400, 200], [1600, 200], [1600, 1400], [400, 1400]], dtype=np.float32)
+    assert live.corners_to_logical_region(corners, screen_scale=2.0) == (200, 100, 600, 600)
+    assert live.corners_to_logical_region(corners, screen_scale=1.0) == (400, 200, 1200, 1200)
+
+
+def test_compute_assistant_window_pos_avoids_overlapping_board():
+    # Board on left half of a 1512x982 MacBook -> assistant placed to the right of board.
+    wx, _wy = live.compute_assistant_window_pos((120, 100, 650, 650), (1512, 982), (390, 760))
+    assert wx >= 120 + 650
+    # Board on right half -> assistant placed to the left of board.
+    wx_left, _ = live.compute_assistant_window_pos((800, 100, 650, 650), (1512, 982), (390, 760))
+    assert wx_left + 390 <= 800
+
+
+def test_full_frame_is_board_mode_uses_entire_cropped_capture():
+    crop = np.full((500, 500, 3), 120, dtype=np.uint8)
+    camera = SimpleNamespace(sample=lambda: (crop.copy(), 1, live.perf_counter()))
+    args = SimpleNamespace(
+        size=800, turn="w", flip=False, stable_frames=1, redetect_every=0,
+        confidence=0.25, imgsz=640, scene="2d", mode="screen", source="screen",
+        castling="KQkq", en_passant="-", screen_board=True, smooth=0.0,
+        full_frame_is_board=True,
+    )
+    seen = []
+
+    def detect(image, *args):
+        seen.append(image.shape)
+        worker._stop.set()
+        return [
+            PieceDetection("white-king", 0.99, (410, 710, 490, 790)),
+            PieceDetection("black-king", 0.99, (410, 10, 490, 90)),
+        ]
+
+    worker = live.LiveInference(camera, SimpleNamespace(detect=detect, is_segmentation=True), None, [], args)
+    worker._run()
+    assert seen == [(800, 800, 3)]
+    assert worker.fen_valid is True

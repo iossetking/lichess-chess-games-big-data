@@ -1,0 +1,38 @@
+{
+  "counts": {
+    "train": {
+      "rook": 4150,
+      "king": 5730,
+      "queen": 4700,
+      "bishop": 4240,
+      "knight": 4235,
+      "pawn": 9710
+    },
+    "val": {
+      "pawn": 655,
+      "rook": 200,
+      "bishop": 211,
+      "king": 108,
+      "knight": 207,
+      "queen": 107
+    },
+    "test": {
+      "pawn": 172,
+      "rook": 54,
+      "knight": 66,
+      "bishop": 67,
+      "king": 28,
+      "queen": 34
+    }
+  },
+  "weights": "data/models/chess-piece-classifier.pt",
+  "imgsz": 160,
+  "val": {
+    "top1": 0.9912634491920471,
+    "top5": 1.0
+  },
+  "test": {
+    "top1": 0.9928740859031677,
+    "top5": 1.0
+  }
+}

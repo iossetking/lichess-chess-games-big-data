@@ -3,7 +3,7 @@
 Pipeline de Big Data, Deep Learning y Visión por Computadora sobre datos oficiales de [Lichess](https://database.lichess.org/):
 
 ```text
-cámara / foto del tablero ──▶ rectificación (OpenCV) ──▶ piezas (YOLO) ──▶ FEN ──▶ mejor jugada (UCI)
+cámara / pantalla / foto ──▶ rectificación (OpenCV) ──▶ piezas (YOLO-seg) ──▶ FEN ──▶ mejor jugada (UCI)
 ```
 
 ## Contenido
@@ -18,7 +18,7 @@ cámara / foto del tablero ──▶ rectificación (OpenCV) ──▶ piezas (Y
   - [Variables de entorno de los cuadernos](#variables-de-entorno-de-los-cuadernos)
 - [5. Ejecución local](#5-ejecución-local)
   - [5.1 Cuadernos interactivos (Marimo)](#51-cuadernos-interactivos-marimo)
-  - [5.2 Visión en vivo (cámara → tablero → FEN → jugada)](#52-visión-en-vivo-cámara--tablero--fen--jugada)
+  - [5.2 Visión en vivo (cámara / pantalla → tablero → FEN → jugada)](#52-visión-en-vivo-cámara--pantalla--tablero--fen--jugada)
   - [5.3 Demos heredadas (ArUco y fotos sin ArUco)](#53-demos-heredadas-aruco-y-fotos-sin-aruco)
 - [6. Explicación técnica del proyecto](#6-explicación-técnica-del-proyecto)
   - [6.1 Predicción de jugadas (Enfoque 1 y Enfoque 3)](#61-predicción-de-jugadas-enfoque-1-y-enfoque-3)
@@ -79,8 +79,8 @@ database.lichess.org (.pgn.zst / .jsonl.zst)
 |---|---|---|---|
 | `scripts/train_chess_piece_yolo.py` | Exporta `dopaul/chess-pieces-merged` (CC BY 4.0) y entrena `yolo11n` para las 12 clases de piezas físicas | **GPU** (`mps` / CUDA `0`) | `data/models/chess-pieces.pt` |
 | `scripts/generate_screen_template.py` | Genera la plantilla 2D de posición inicial (`800×800`, colores verde/crema) para entrenar el modelo de pantalla | **Local (CPU)** | `data/vision/screen-template.png` |
-| `scripts/train_screen_chess_yoloseg.py` | Genera posiciones sintéticas desde una plantilla 2D y entrena `yolo11n-seg` para tableros en pantalla de celular | **GPU** (`mps` / CUDA `0`) | `data/models/screen-chess-pieces-seg.pt` |
-| `scripts/live_chess_fen.py` | Vista en vivo: cámara → tablero → YOLO → FEN → flechas de los modelos de jugadas | **Local** | Ventanas OpenCV en vivo |
+| `scripts/train_screen_chess_yoloseg.py` | Genera 2,000 tableros sintéticos multi-estilo (Chess.com Neo + Lichess cburnett, 8 temas, resaltados y artefactos de cámara/pantalla) y entrena `yolo11s-seg` | **GPU** (`mps` / CUDA `0`) | `data/models/screen-chess-pieces-seg.pt` |
+| `scripts/live_chess_fen.py` | Vista en vivo (webcam, captura directa de pantalla o foto): tablero → rectificación → YOLO-seg → FEN → flechas y consenso de los 5 modelos | **Local** | Ventana(s) OpenCV en vivo |
 | `scripts/compact_checkpoints.py` | Convierte checkpoints antiguos a media precisión (`float16`); `--dry-run` solo informa el ahorro | **Local (CPU)** | Checkpoints compactados |
 | `scripts/chessboard_camera_demo.py` / `chessboard_photo_demo.py` / `generate_aruco_markers.py` | Demos heredadas de calibración con ArUco o esquinas manuales | **Local** | Tablero rectificado |
 
@@ -162,12 +162,11 @@ Los cuadernos se ejecutan sin interfaz y leen sus parámetros desde variables de
    uv run python scripts/train_chess_piece_yolo.py \
      --epochs 50 --device mps --imgsz 640 --batch 16
 
-   # Opcional · tablero 2D en pantalla de celular (genera plantilla + YOLO-seg sintético)
-   uv run python scripts/generate_screen_template.py
+   # Opcional · tablero 2D en pantalla (multi-estilo Chess.com Neo + Lichess cburnett -> screen-chess-pieces-seg.pt)
    uv run python scripts/train_screen_chess_yoloseg.py \
-     --epochs 35 --device mps --imgsz 640 --batch 8
+     --epochs 15 --device mps --imgsz 640 --batch 16 --base-model yolo11s-seg.pt --force
    ```
-   *(Cambia `--device mps` por `--device 0` en GPU NVIDIA o `--device cpu` si no tienes GPU. Si quieres usar exactamente el estilo visual de tu app móvil, reemplaza `data/vision/screen-template.png` por una captura recortada del tablero inicial antes de entrenar).*
+   *(Cambia `--device mps` por `--device 0` en GPU NVIDIA o `--device cpu` si no tienes GPU. El script combina automáticamente `data/vision/screen-template.png` —p. ej. Chess.com Neo— con los sprites `cburnett` de `chess.svg.PIECES` sobre 8 temas de tablero. Si no tienes `screen-template.png`, genéralo antes con `scripts/generate_screen_template.py`).*
 
 > Los cuadernos `02` y `03` reutilizan `data/processed/*.parquet` y, si faltan, generan una muestra pequeña por su cuenta. Al terminar, pasa a [5. Ejecución local](#5-ejecución-local).
 
@@ -278,12 +277,10 @@ colab download -s lichess-train \
   data/models/chess-pieces.pt
 ```
 
-Si además necesitas reentrenar el modelo YOLO-seg para tablero 2D en pantalla de celular (`screen-chess-pieces-seg.pt`), genera primero `data/vision/screen-template.png` en local (o sustitúyelo por una captura recortada de tu tablero en pantalla) y súbelo a Colab:
+Si además necesitas reentrenar el modelo YOLO-seg para tablero 2D en pantalla (`screen-chess-pieces-seg.pt`, ya incluido en Git LFS con mAP50 = 1.000 sobre Chess.com Neo y Lichess cburnett), sube tu `data/vision/screen-template.png` (o genéralo antes) y entrena con `yolo11s-seg.pt`:
 
 ```bash
-# 7b. Opcional · plantilla 2D + YOLO-seg sintético para pantalla de celular (-> screen-chess-pieces-seg.pt)
-uv run python scripts/generate_screen_template.py
-
+# 7b. Opcional · YOLO-seg multi-estilo para pantalla (-> screen-chess-pieces-seg.pt)
 colab exec -s lichess-train --timeout 0 <<'PY'
 !mkdir -p /content/lichess-chess-games-big-data/data/vision
 PY
@@ -293,7 +290,7 @@ colab upload -s lichess-train \
 
 colab exec -s lichess-train --timeout 0 <<'PY'
 !python /content/lichess-chess-games-big-data/scripts/train_screen_chess_yoloseg.py \
-  --epochs 35 --device 0 --imgsz 640 --batch 16 --base-model yolo11n-seg.pt
+  --epochs 15 --device 0 --imgsz 640 --batch 16 --base-model yolo11s-seg.pt --force
 PY
 
 colab download -s lichess-train \
@@ -363,58 +360,42 @@ uv run marimo edit notebooks/03_maia.py
 
 ---
 
-### 5.2 Visión en vivo (cámara → tablero → FEN → jugada)
+### 5.2 Visión en vivo (cámara / pantalla → tablero → FEN → jugada)
 
-La ruta de producción es [`scripts/live_chess_fen.py`](scripts/live_chess_fen.py). No usa ArUco ni clics manuales: OpenCV detecta las 49 intersecciones internas del tablero 8×8, calcula la homografía, corre YOLO sobre el tablero rectificado, construye el FEN y carga automáticamente los modelos de jugadas presentes en `data/models/`.
+El script principal para probar visión + predicción de jugadas al mismo tiempo es [`scripts/live_chess_fen.py`](scripts/live_chess_fen.py). Si ya clonaste el repo y bajaste los pesos con `uv sync` y `git lfs pull`, no necesitas volver a entrenar nada: el script carga solos el modelo de visión (`data/models/screen-chess-pieces-seg.pt`) y los 5 modelos de jugadas entrenados en `data/models/`.
 
-#### Tablero físico · detección por cajas (`chess-pieces.pt`)
+Sobre cada pieza detectada dibuja una **caja con el nombre en español y el porcentaje de confianza** (`peon 97%`, `caballo 97%`, `dama 98%`, etc.; en **cian** las blancas y en **naranja** las negras), opcionalmente su máscara de segmentación, y encima proyecta las flechas con la mejor siguiente jugada según los 5 modelos.
 
-```bash
-uv run python scripts/live_chess_fen.py \
-  --weights data/models/chess-pieces.pt \
-  --turn w --castling KQkq
-```
-
-#### Tablero físico · segmentación YOLO-seg (`chess-pieces-seg.pt`)
-
-Si usas pesos de segmentación, superpone además la máscara de píxeles de cada pieza:
+#### Cómo correrlo (comandos listos para usar)
 
 ```bash
-uv run python scripts/live_chess_fen.py \
-  --weights data/models/chess-pieces-seg.pt \
-  --require-segmentation \
-  --confidence 0.25 \
-  --turn w --castling KQkq
+# 1. Captura directa de tu pantalla (sin webcam, ideal para jugar en Chess.com o Lichess)
+uv run python scripts/live_chess_fen.py --source screen
+
+# 2. Webcam apuntando a un celular o a otro monitor
+uv run python scripts/live_chess_fen.py
+
+# 3. Probar con una sola captura de pantalla o foto
+uv run python scripts/live_chess_fen.py --image ruta/a/captura.png
+
+# 4. Tablero físico 3D con webcam (usa chess-pieces.pt)
+uv run python scripts/live_chess_fen.py --mode physical
 ```
 
-#### Tablero digital en pantalla (`screen-chess-pieces-seg.pt`)
+*(Para tablero físico con segmentación: `uv run python scripts/live_chess_fen.py --mode physical --weights data/models/chess-pieces-seg.pt --require-segmentation`.)*
 
-Los pesos de tablero físico no generalizan a sprites 2D mostrados en pantalla. Para este modo puedes capturar **directamente la pantalla de tu computadora** (sin cámara ni reflejos) o seguir apuntando una cámara a la pantalla del celular:
+#### Guía rápida para captura directa en pantalla (`--source screen`)
 
-- **Opción A · Captura en vivo desde la pantalla de la computadora (recomendada):**
-  ```bash
-  # Detecta automáticamente un tablero verde/crema en el monitor principal:
-  uv run python scripts/live_chess_fen.py \
-    --weights data/models/screen-chess-pieces-seg.pt \
-    --require-segmentation --screen-capture \
-    --confidence 0.25 --turn w --castling KQkq
-
-  # O arrastra con el mouse la región exacta del tablero (funciona con cualquier color de tablero):
-  uv run python scripts/live_chess_fen.py \
-    --weights data/models/screen-chess-pieces-seg.pt \
-    --require-segmentation --screen-capture --select-region \
-    --confidence 0.25 --turn w --castling KQkq
-  ```
-  *(En macOS la primera vez te pedirá permiso de **Grabación de pantalla** para tu terminal/IDE en Ajustes del Sistema → Privacidad y seguridad. Pon la ventana del script al lado del navegador para no tapar el tablero; puedes pulsar `s` en cualquier momento para volver a seleccionar el área).*
-
-- **Opción B · Apuntando una cámara al tablero en el celular:**
-  ```bash
-  uv run python scripts/live_chess_fen.py \
-    --weights data/models/screen-chess-pieces-seg.pt \
-    --require-segmentation --screen-board \
-    --confidence 0.25 --camera 0 \
-    --turn w --castling KQkq
-  ```
+1. Abre tu partida de **Chess.com** o **Lichess** en un lado de tu pantalla (por ejemplo, en la mitad izquierda) y corre en tu terminal:
+   ```bash
+   uv run python scripts/live_chess_fen.py --source screen
+   ```
+2. Se abre una captura de tu pantalla para ubicar el tablero:
+   - Si el tablero ya aparece encerrado en un cuadro **verde**, solo presiona **`Enter`**.
+   - Si no lo agarró solo, **arrastra un rectángulo** con el mouse cubriendo el tablero (de la esquina superior izquierda a la inferior derecha) y presiona **`Enter`**. *(Si necesitabas cambiar de ventana antes, pulsa `r` para tomar otra captura.)*
+3. El selector se cierra y se abre la ventana compacta **`Chess Assistant | 5 Modelos`** colocada automáticamente al costado libre de tu tablero (para no taparlo). Ahí vas viendo en tiempo real las cajas con porcentaje de cada pieza, el estado del FEN, el consenso de la mejor jugada y el top-3 de los 5 modelos.
+   - **Tip importante:** no arrastres la ventana del asistente encima del tablero del navegador, porque si la tapas la captura va a grabar al propio asistente. Si mueves tu navegador, pulsa **`c`** para volver a marcar el tablero.
+   - **Permiso en macOS:** si la captura sale negra o falla, dale permiso de *Grabación de pantalla* a tu terminal en *Ajustes del Sistema → Privacidad y seguridad*.
 
 #### Usar la cámara del celular en cualquiera de los modelos (Mac + iPhone o Mac + Samsung)
 
@@ -433,28 +414,39 @@ Los pesos de tablero físico no generalizan a sprites 2D mostrados en pantalla. 
     --turn w --castling KQkq
   ```
 
-#### Modelos dibujados sobre el tablero y controles en vivo
+#### Modelos dibujados sobre el tablero y teclas de control
 
-Cada modelo encontrado en `data/models/` proyecta su mejor jugada con flecha estilo SeeMate (trayectoria en L para caballos, casilla destino resaltada y etiqueta con notación algebraica y probabilidad):
+Cada modelo encontrado en `data/models/` dibuja su mejor jugada con flecha estilo SeeMate (en L para caballos, con notación algebraica y probabilidad) y aparece en el panel de resultados:
 
-| Modelo | Archivo en `data/models/` | Color de flecha |
-|---|---|---|
-| Desde cero | `approach1_scratch.pt` | cian |
-| Ajuste de pesos | `approach1_weight_ftuning.pt` | naranja |
-| Ajuste LoRA | `approach1_lora_ftuning.pt` | verde |
-| Maia-3 humano | `maia3_lora_human.pt` | azul |
-| Maia-3 Stockfish | `maia3_lora_stockfish.pt` | magenta |
+| Modelo | Archivo en `data/models/` | Color de flecha | Tecla |
+|---|---|---|---|
+| Desde cero | `approach1_scratch.pt` | cian | `1` |
+| Ajuste de pesos | `approach1_weight_ftuning.pt` | naranja | `2` |
+| Ajuste LoRA | `approach1_lora_ftuning.pt` | verde | `3` |
+| Maia-3 humano | `maia3_lora_human.pt` | azul | `4` |
+| Maia-3 Stockfish | `maia3_lora_stockfish.pt` | magenta | `5` |
 
-- **Teclas en la ventana**: `t` alterna el turno, `f` rota la orientación si la cámara está del lado de negras, `r` recalibra las esquinas del tablero, `s` (en `--screen-capture`) vuelve a seleccionar la región de pantalla con el mouse, `q` o `Esc` cierra.
-- **Flags útiles**:
-  - `--move-models` (uno o varios archivos) o `--move-model` (uno solo) para elegir qué modelos comparar; la arquitectura se detecta automáticamente desde el archivo.
-  - `--turn`, `--castling`, `--en-passant`: la imagen no puede saber el turno ni los derechos de enroque/captura al paso; pásalos para que el FEN sea exacto.
-  - `--board-weights`: acepta de forma opcional un YOLO-seg con clase `board`/`chessboard` como respaldo si las líneas de la cuadrícula están muy ocluidas.
-  - `--monitor` / `--region left,top,width,height`: selecciona otro monitor o pasa coordenadas fijas para `--screen-capture`.
-  - `--single-window`: muestra una sola ventana en modo cámara (en `--screen-capture` viene activado por defecto).
+- **Controles con el teclado (dentro de la ventana):**
+  - `c`: volver a seleccionar la zona del tablero (en `--source screen`) o marcar las 4 esquinas con clic `a8 → h8 → h1 → a1` (en webcam).
+  - `v`: cambiar entre vista compacta vertical y vista ancha (en `--source screen`).
+  - `r`: volver a detectar el tablero automáticamente (en webcam).
+  - `t`: cambiar de turno (blancas / negras).
+  - `f`: girar el tablero 180° si estás jugando con negras abajo.
+  - `k`: cambiar derechos de enroque (`KQkq → KQ → kq → -`; los enroques imposibles se quitan solos si ya se movió el rey o la torre).
+  - `m`: prender o apagar el relleno de máscaras de segmentación (las cajas y porcentajes se mantienen visibles).
+  - `0` o `1`–`5`: mostrar los 5 modelos al mismo tiempo (`0`) o ver solo un modelo (`1`–`5`).
+  - `s`: guardar una imagen con el análisis actual en `data/snapshots/`.
+  - `q` o `Esc`: cerrar el programa.
+- **Opciones extra de consola:**
+  - `--screen-region x,y,w,h`: salta el selector usando las coordenadas que imprime la terminal la primera vez.
+  - `--screen-capture` / `--select-region` / `--monitor` / `--region left,top,width,height`: modo alternativo de captura continua de pantalla con `mss`.
+  - `--camera <índice o URL>` y `--list-cameras`: elige webcam local, Continuity Camera o stream IP.
   - `--hold-missing 3`: mantiene piezas ya detectadas hasta 3 frames si parpadean (`0` lo desactiva).
-  - `--redetect-every 60`: recalibra periódicamente si el encuadre cambia.
-  - `--imgsz 416`: acelera la inferencia YOLO a cambio de algo menos de detalle (por defecto `640`).
+  - `--single-window`: muestra una sola ventana en modo cámara.
+  - `--image <ruta>` y `--save-output <ruta>`: analiza una sola captura y guarda el resultado.
+  - `--move-models <archivos...>` o `--no-move-models`: elige qué modelos de jugadas cargar.
+  - `--board-weights`: YOLO-seg opcional con clase `board`/`chessboard` como respaldo.
+  - `--imgsz 416`: baja la resolución de inferencia si necesitas más FPS.
 
 > **Notas sobre pesos de visión:**
 > - Los pesos deben entrenarse con las 12 clases coloreadas (`w-pawn`/`b-king`, `white_pawn`/`black_king` o equivalentes). Un checkpoint COCO genérico (`yolo*.pt`) **no sirve**.
@@ -520,9 +512,10 @@ Estas utilidades solo localizan y rectifican el tablero (no predicen jugadas; el
 
 ### 6.3 Pipeline de visión por computadora
 
-- **Hilos desacoplados**: la captura de cámara y la inferencia YOLO corren en hilos separados; `Camera` se actualiza en tiempo real y `Board + YOLO pieces` refresca en cuanto termina cada inferencia (`CAM LIVE` muestra los FPS de YOLO y la antigüedad de la última predicción).
-- **Estabilidad**: las sugerencias de jugada solo se recalculan cuando la posición detectada se mantiene idéntica durante cuatro frames consecutivos, evitando parpadeos al mover la mano o una pieza.
-- **Proyección inversa**: las flechas de cada modelo de jugadas se transforman de coordenadas del tablero rectificado a la imagen original de la cámara usando la homografía inversa.
+- **Modelo de pantalla reentrenado en Colab (`screen-chess-pieces-seg.pt`)**: antes fallaba en piezas de Chess.com porque solo se había entrenado con un estilo y fondo verde plano. Se reentrenó con `yolo11s-seg` sobre 2,000 tableros sintéticos que combinan **Chess.com Neo** (extraído sin bordes verdes mediante *alpha matting* de doble fondo) y **Lichess `cburnett`**, en 8 temas de color, con casillas resaltadas de última jugada, jaque, coordenadas y degradaciones de cámara/pantalla. En el conjunto de prueba (200 tableros, 5,158 piezas) alcanzó **99.97 % de precisión**, **100 % de recall** y **1.000 de mAP50**.
+- **Rectificación antes de YOLO y detección multi-tema**: en modo pantalla primero se ubica el tablero (ya sea verde Chess.com o cualquier otro color por periodicidad de la cuadrícula 8×8 con `detect_any_screen_board`) y se rectifica a `800×800` **antes** de pasarlo a YOLO-seg. Así las piezas siempre llegan al tamaño exacto de entrenamiento, evitando confusiones por fondo o perspectiva.
+- **Captura directa de pantalla sin bucle infinito**: `--source screen` detecta la escala Retina de macOS, abre un selector de un solo arrastre, cierra la ventana de selección antes de empezar y coloca una sola ventana compacta (`Chess Assistant`) al costado libre del tablero para no tapar el navegador.
+- **Estabilidad, cajas con porcentaje e integración con los 5 modelos**: la captura y la inferencia corren en hilos separados con suavizado entre frames (`PieceLabelSmoother`) y estabilización de FEN (`FenStabilizer`). Además `sanitize_fen_castling` quita automáticamente enroques imposibles cuando se mueve rey o torre y `validate_fen_position` avisa en español si algo está mal (por ejemplo, turno invertido). En pantalla se muestran cajas con el nombre en español y confianza de cada pieza, máscaras opcionales, el consenso (`MEJOR JUGADA (X/5)`) y las flechas de los 5 modelos entrenados.
 
 ---
 

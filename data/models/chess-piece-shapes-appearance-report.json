@@ -1,0 +1,31 @@
+{
+  "grayscale/2d": {
+    "metrics/precision(B)": 0.9995443314590385,
+    "metrics/recall(B)": 1.0,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.9943097314312503,
+    "fitness": 0.9943097314312503
+  },
+  "grayscale/3d": {
+    "metrics/precision(B)": 0.9159535244121675,
+    "metrics/recall(B)": 0.6395770874171641,
+    "metrics/mAP50(B)": 0.7087079786939223,
+    "metrics/mAP50-95(B)": 0.524537273623809,
+    "fitness": 0.524537273623809
+  },
+  "hue-shift/2d": {
+    "metrics/precision(B)": 0.9995661396583646,
+    "metrics/recall(B)": 1.0,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.994249780982233,
+    "fitness": 0.994249780982233
+  },
+  "hue-shift/3d": {
+    "metrics/precision(B)": 0.9101204445789034,
+    "metrics/recall(B)": 0.6393713341757202,
+    "metrics/mAP50(B)": 0.7239921578756155,
+    "metrics/mAP50-95(B)": 0.5415404684429396,
+    "fitness": 0.5415404684429396
+  },
+  "limitations": "Same held-out images with colour transforms; not a test of unseen piece designs, lighting or materials."
+}

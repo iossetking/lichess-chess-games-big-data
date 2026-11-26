@@ -6,6 +6,14 @@ Pipeline de Big Data, Deep Learning y Visión por Computadora sobre datos oficia
 cámara / pantalla / foto ──▶ rectificación (OpenCV) ──▶ piezas (YOLO-seg) ──▶ FEN ──▶ mejor jugada (UCI)
 ```
 
+> **Inicio rápido (probar el proyecto sin volver a entrenar):**
+> ```bash
+> uv sync
+> git lfs pull
+> uv run python scripts/live_chess_fen.py --source screen
+> ```
+> Abre una partida en **Chess.com** o **Lichess** en un lado de tu pantalla y ejecuta el comando: detecta el tablero en automático (sin clics ni recuadros manuales), muestra cada pieza con su caja, nombre y porcentaje de confianza, y sugiere la mejor siguiente jugada comparando los 5 modelos entrenados. Para más modos (webcam, foto única, tablero físico y controles con teclado), consulta la sección [5.2 Visión en vivo](#52-visión-en-vivo-cámara--pantalla--tablero--fen--jugada).
+
 ## Contenido
 
 - [1. Descripción general](#1-descripción-general)
@@ -384,17 +392,18 @@ uv run python scripts/live_chess_fen.py --mode physical
 
 *(Para tablero físico con segmentación: `uv run python scripts/live_chess_fen.py --mode physical --weights data/models/chess-pieces-seg.pt --require-segmentation`.)*
 
-#### Guía rápida para captura directa en pantalla (`--source screen`)
+#### Guía rápida para captura directa en pantalla (`--source screen` · 100 % automático)
 
 1. Abre tu partida de **Chess.com** o **Lichess** en un lado de tu pantalla (por ejemplo, en la mitad izquierda) y corre en tu terminal:
    ```bash
    uv run python scripts/live_chess_fen.py --source screen
    ```
-2. Se abre una captura de tu pantalla para ubicar el tablero:
-   - Si el tablero ya aparece encerrado en un cuadro **verde**, solo presiona **`Enter`**.
-   - Si no lo agarró solo, **arrastra un rectángulo** con el mouse cubriendo el tablero (de la esquina superior izquierda a la inferior derecha) y presiona **`Enter`**. *(Si necesitabas cambiar de ventana antes, pulsa `r` para tomar otra captura.)*
-3. El selector se cierra y se abre la ventana compacta **`Chess Assistant | 5 Modelos`** colocada automáticamente al costado libre de tu tablero (para no taparlo). Ahí vas viendo en tiempo real las cajas con porcentaje de cada pieza, el estado del FEN, el consenso de la mejor jugada y el top-3 de los 5 modelos.
-   - **Tip importante:** no arrastres la ventana del asistente encima del tablero del navegador, porque si la tapas la captura va a grabar al propio asistente. Si mueves tu navegador, pulsa **`c`** para volver a marcar el tablero.
+2. **Detección automática sin clics ni recuadro verde:**
+   - Si tu tablero ya está visible en pantalla, lo detecta solo al instante y abre directamente la ventana compacta **`Chess Assistant | 5 Modelos`** colocada al costado libre (sin tapar tu partida).
+   - Si lanzaste el comando desde la terminal tapando el navegador, aparece una tarjetita discreta en la esquina superior derecha (*«Buscando tablero en tu pantalla...»*). En cuanto te cambias a **Chess.com** o **Lichess**, engancha el tablero automáticamente y empieza a mostrar las cajas con porcentaje de cada pieza y las flechas de los 5 modelos.
+3. **Mientras juegas:**
+   - Si mueves o cambias de tamaño tu navegador, solo pulsa **`r`** para que vuelva a detectar el tablero en automático (o **`c`** si prefieres marcarlo manualmente con un arrastre).
+   - **Tip importante:** no pongas la ventana del asistente encima del tablero del navegador para no tapar la captura.
    - **Permiso en macOS:** si la captura sale negra o falla, dale permiso de *Grabación de pantalla* a tu terminal en *Ajustes del Sistema → Privacidad y seguridad*.
 
 #### Usar la cámara del celular en cualquiera de los modelos (Mac + iPhone o Mac + Samsung)
@@ -427,9 +436,9 @@ Cada modelo encontrado en `data/models/` dibuja su mejor jugada con flecha estil
 | Maia-3 Stockfish | `maia3_lora_stockfish.pt` | magenta | `5` |
 
 - **Controles con el teclado (dentro de la ventana):**
-  - `c`: volver a seleccionar la zona del tablero (en `--source screen`) o marcar las 4 esquinas con clic `a8 → h8 → h1 → a1` (en webcam).
+  - `r`: volver a detectar el tablero automáticamente (tanto en `--source screen` como en webcam).
+  - `c`: elegir la zona del tablero manualmente con el mouse (respaldo en `--source screen`) o marcar las 4 esquinas con clic `a8 → h8 → h1 → a1` (en webcam).
   - `v`: cambiar entre vista compacta vertical y vista ancha (en `--source screen`).
-  - `r`: volver a detectar el tablero automáticamente (en webcam).
   - `t`: cambiar de turno (blancas / negras).
   - `f`: girar el tablero 180° si estás jugando con negras abajo.
   - `k`: cambiar derechos de enroque (`KQkq → KQ → kq → -`; los enroques imposibles se quitan solos si ya se movió el rey o la torre).
@@ -438,7 +447,8 @@ Cada modelo encontrado en `data/models/` dibuja su mejor jugada con flecha estil
   - `s`: guardar una imagen con el análisis actual en `data/snapshots/`.
   - `q` o `Esc`: cerrar el programa.
 - **Opciones extra de consola:**
-  - `--screen-region x,y,w,h`: salta el selector usando las coordenadas que imprime la terminal la primera vez.
+  - `--manual-select`: abre el selector manual de arrastre desde el inicio en `--source screen`.
+  - `--screen-region x,y,w,h`: fija las coordenadas exactas del tablero sin buscarlo.
   - `--screen-capture` / `--select-region` / `--monitor` / `--region left,top,width,height`: modo alternativo de captura continua de pantalla con `mss`.
   - `--camera <índice o URL>` y `--list-cameras`: elige webcam local, Continuity Camera o stream IP.
   - `--hold-missing 3`: mantiene piezas ya detectadas hasta 3 frames si parpadean (`0` lo desactiva).

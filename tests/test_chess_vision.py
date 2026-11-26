@@ -269,3 +269,18 @@ def test_validate_fen_position_reports_clear_spanish_diagnostics():
     # Black king in check while it is White's turn -> wrong turn hint
     ok, reason = validate_fen_position("4k3/4Q3/8/8/8/8/8/4K3 w - - 0 1")
     assert not ok and "[t]" in reason
+
+
+def test_green_screen_board_ignores_chess_com_green_sidebar_button():
+    frame = np.full((900, 1440, 3), (40, 40, 40), dtype=np.uint8)
+    x0, y0, side = 160, 120, 72
+    for r in range(8):
+        for c in range(8):
+            colour = (208, 236, 235) if (r + c) % 2 == 0 else (86, 149, 119)
+            frame[y0 + r * side:y0 + (r + 1) * side, x0 + c * side:x0 + (c + 1) * side] = colour
+    # Simulate a large bright-green "Play / New Game" button in the right sidebar.
+    frame[220:300, 960:1320] = (76, 182, 129)
+    corners = detect_green_screen_board(frame)
+    assert corners is not None
+    expected = [[x0, y0], [x0 + 8 * side - 1, y0], [x0 + 8 * side - 1, y0 + 8 * side - 1], [x0, y0 + 8 * side - 1]]
+    np.testing.assert_allclose(corners, expected, atol=8)

@@ -443,15 +443,48 @@ def corners_to_logical_region(
     return lx, ly, lw, lh
 
 
-def select_screen_board_region(screen_scale: float) -> tuple[int, int, int, int] | None:
+def _close_window(name: str) -> None:
+    """Close an OpenCV window and pump macOS Cocoa events so it actually disappears."""
+    try:
+        cv2.destroyWindow(name)
+    except cv2.error:
+        pass
+    for _ in range(10):
+        cv2.waitKey(1)
+    sleep(0.25)
+
+
+def compute_assistant_window_pos(
+    board_region: tuple[int, int, int, int],
+    screen_logical_size: tuple[int, int],
+    window_size: tuple[int, int],
+) -> tuple[int, int]:
+    """Choose ``(x, y)`` for the assistant window so it does NOT overlap the chessboard."""
+    bx, by, bw, bh = board_region
+    sw, sh = screen_logical_size
+    ww, wh = window_size
+    pad = 16
+    # Prefer right of the board, then left of the board, else snap to the farthest screen edge.
+    if bx + bw + pad + ww <= sw:
+        wx = bx + bw + pad
+    elif bx - pad - ww >= 0:
+        wx = bx - pad - ww
+    else:
+        right_space = sw - (bx + bw)
+        left_space = bx
+        wx = max(0, sw - ww - 8) if right_space >= left_space else 8
+    wy = max(36, min(by, max(36, sh - wh - 24)))
+    return int(wx), int(wy)
+
+
+def select_screen_board_region(
+    screen_scale: float,
+) -> tuple[tuple[int, int, int, int], tuple[int, int]] | None:
     """Interactive one-drag board selector for ``--source screen``.
 
-    Takes a single scaled screenshot so it fits comfortably on Retina displays,
-    auto-detects any visible chessboard as a suggested green box, and lets the
-    user press ``Enter`` to accept it or click-and-drag a rectangle around the
-    board (``r`` refreshes the screenshot, ``Esc``/``q`` cancels).
+    Returns ``((x, y, w, h), (screen_logical_w, screen_logical_h))`` or ``None``.
     """
-    picker_win = "Paso 1: Selecciona el tablero (Arrastra + Enter | r refrescar | Esc salir)"
+    picker_win = "Paso 1: Selecciona el tablero (Enter confirmar | Arrastra cuadro | r refrescar)"
     cv2.namedWindow(picker_win, cv2.WINDOW_NORMAL)
 
     def grab_fresh() -> tuple[np.ndarray | None, float, tuple[int, int, int, int] | None]:
@@ -459,7 +492,7 @@ def select_screen_board_region(screen_scale: float) -> tuple[int, int, int, int]
         if full is None:
             return None, 1.0, None
         fh, fw = full.shape[:2]
-        disp_scale = min(1.0, 1180.0 / max(fw, 1), 700.0 / max(fh, 1))
+        disp_scale = min(1.0, 1120.0 / max(fw, 1), 660.0 / max(fh, 1))
         auto_corners = detect_any_screen_board(full)
         auto_box = None
         if auto_corners is not None:
@@ -470,7 +503,7 @@ def select_screen_board_region(screen_scale: float) -> tuple[int, int, int, int]
 
     full, disp_scale, selected_px = grab_fresh()
     if full is None:
-        cv2.destroyWindow(picker_win)
+        _close_window(picker_win)
         return None
 
     dragging = False
@@ -496,6 +529,7 @@ def select_screen_board_region(screen_scale: float) -> tuple[int, int, int, int]
                 selected_px = (x1, y1, x2, y2)
 
     cv2.setMouseCallback(picker_win, on_mouse)
+    cv2.moveWindow(picker_win, 40, 40)
     try:
         while True:
             dh, dw = int(round(full.shape[0] * disp_scale)), int(round(full.shape[1] * disp_scale))
@@ -512,7 +546,6 @@ def select_screen_board_region(screen_scale: float) -> tuple[int, int, int, int]
             if active_box is not None:
                 dx1, dy1 = int(round(active_box[0] * disp_scale)), int(round(active_box[1] * disp_scale))
                 dx2, dy2 = int(round(active_box[2] * disp_scale)), int(round(active_box[3] * disp_scale))
-                # Dim area outside the chosen board so the selection is unmistakable.
                 dimmed = (view.astype(np.float32) * 0.45).astype(np.uint8)
                 dimmed[max(0, dy1):min(dh, dy2), max(0, dx1):min(dw, dx2)] = view[
                     max(0, dy1):min(dh, dy2), max(0, dx1):min(dw, dx2)
@@ -528,27 +561,31 @@ def select_screen_board_region(screen_scale: float) -> tuple[int, int, int, int]
             else:
                 msg = "ARRASTRA con el mouse un rectangulo sobre el tablero (de a8 a h1) y pulsa [ENTER]  |  [r] refrescar"
                 col = (255, 230, 110)
-            cv2.putText(view, msg, (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.56, col, 1, cv2.LINE_AA)
+            cv2.putText(view, msg, (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.54, col, 1, cv2.LINE_AA)
             cv2.imshow(picker_win, view)
             cv2.resizeWindow(picker_win, dw, dh)
 
             key = cv2.waitKey(20) & 0xFF
-            if key in (13, 10, 32) and selected_px is not None:  # Enter or Space
+            if key in (13, 10, 3, 32) and selected_px is not None:  # Return, LF, Numpad Enter, or Space
                 x1, y1, x2, y2 = selected_px
                 corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
-                return corners_to_logical_region(corners, screen_scale)
+                logical_screen = (
+                    max(640, int(round(full.shape[1] / max(screen_scale, 1e-3)))),
+                    max(480, int(round(full.shape[0] / max(screen_scale, 1e-3)))),
+                )
+                return corners_to_logical_region(corners, screen_scale), logical_screen
             if key == ord("r"):
-                cv2.destroyWindow(picker_win)
-                sleep(0.25)
+                _close_window(picker_win)
                 cv2.namedWindow(picker_win, cv2.WINDOW_NORMAL)
                 cv2.setMouseCallback(picker_win, on_mouse)
+                cv2.moveWindow(picker_win, 40, 40)
                 fresh, fresh_scale, auto_box = grab_fresh()
                 if fresh is not None:
                     full, disp_scale, selected_px = fresh, fresh_scale, auto_box
             if key in (27, ord("q")):
                 return None
     finally:
-        cv2.destroyWindow(picker_win)
+        _close_window(picker_win)
 
 
 class LatestScreenFrame:
@@ -1571,13 +1608,23 @@ def main() -> int:
 
     if args.source == "screen":
         screen_scale = _detect_screen_scale()
+        logical_screen = (1440, 900)
         if region is None:
-            print("Deja visible tu tablero (Chess.com / Lichess), arrastra un rectangulo sobre el y pulsa Enter...")
-            region = select_screen_board_region(screen_scale)
-            if region is None:
+            print("Deja visible tu tablero (Chess.com / Lichess), pulsa Enter si sale en verde o arrastra un cuadro...")
+            picked = select_screen_board_region(screen_scale)
+            if picked is None:
                 print("Seleccion cancelada.")
                 return 0
+            region, logical_screen = picked
             print(f"Zona de tablero seleccionada: --screen-region {region[0]},{region[1]},{region[2]},{region[3]}")
+        else:
+            full_probe = _grab_screen_bgr(None)
+            if full_probe is not None:
+                logical_screen = (
+                    max(640, int(round(full_probe.shape[1] / max(screen_scale, 1e-3)))),
+                    max(480, int(round(full_probe.shape[0] / max(screen_scale, 1e-3)))),
+                )
+
         args.full_frame_is_board = True
         source_feed: Any = LatestScreenFrame(region=region)
         if not source_feed.is_opened():
@@ -1588,12 +1635,21 @@ def main() -> int:
         inference.manual_locked = True
         inference.start()
 
-        assistant_win = "Chess Assistant | YOLO-seg + 5 Modelos"
+        # Compact vertical layout by default so it fits beside Chess.com/Lichess without covering the board!
+        compact_mode = True
+        compact_size = (360, 760)
+        wide_size = (900, 615)
+
+        assistant_win = "Chess Assistant | 5 Modelos"
         cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(assistant_win, 936, 640)
+        win_w, win_h = compact_size
+        wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
+        cv2.resizeWindow(assistant_win, win_w, win_h)
+        cv2.moveWindow(assistant_win, wx, wy)
         print(
-            "Asistente de pantalla listo (coloca esta ventana al lado de tu tablero).\n"
-            "Teclas: [c] cambiar zona del tablero | [t] turno | [f] girar (negras) | "
+            f"Asistente de pantalla listo en ({wx}, {wy}) fuera de tu tablero.\n"
+            "IMPORTANTE: NO pongas esta ventana encima del tablero de ajedrez.\n"
+            "Teclas: [c] cambiar zona | [v] vista compacta/ancha | [t] turno | [f] girar (negras) | "
             "[k] enroque | [m] mascaras | [0/1-5] modelos | [s] guardar | [q/Esc] salir."
         )
         try:
@@ -1601,24 +1657,45 @@ def main() -> int:
                 snap = inference.state()
                 board_vis = snap["board_image"]
                 if board_vis is not None:
-                    cv2.imshow(assistant_win, board_vis)
+                    if compact_mode and board_vis.shape[1] == args.size + 370:
+                        # Stack miniature rectified board (370x370) above the 370px telemetry sidebar + hotkey bar.
+                        board_part = cv2.resize(board_vis[:, :args.size], (370, 370), interpolation=cv2.INTER_AREA)
+                        panel_part = board_vis[:500, args.size:].copy()
+                        footer = np.full((42, 370, 3), (22, 24, 28), dtype=np.uint8)
+                        cv2.line(footer, (12, 2), (358, 2), (70, 75, 85), 1)
+                        cv2.putText(footer, "[c] Zona [v] Vista [t] Turno [f] Girar", (12, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.41, (185, 195, 210), 1, cv2.LINE_AA)
+                        cv2.putText(footer, "[0/1-5] Modelos [m] Mascaras [q] Salir", (12, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.41, (185, 195, 210), 1, cv2.LINE_AA)
+                        display_img = np.vstack([board_part, panel_part, footer])
+                    else:
+                        display_img = board_vis
+                    cv2.imshow(assistant_win, display_img)
                 key = cv2.waitKey(20) & 0xFF
                 if key in (27, ord("q")):
                     return 0
+                if key == ord("v"):
+                    compact_mode = not compact_mode
+                    win_w, win_h = compact_size if compact_mode else wide_size
+                    wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
+                    cv2.resizeWindow(assistant_win, win_w, win_h)
+                    cv2.moveWindow(assistant_win, wx, wy)
+                    continue
                 if key == ord("c"):
-                    cv2.destroyWindow(assistant_win)
-                    sleep(0.25)
-                    new_region = select_screen_board_region(screen_scale)
-                    if new_region is not None:
-                        source_feed.set_region(new_region)
+                    _close_window(assistant_win)
+                    picked = select_screen_board_region(screen_scale)
+                    if picked is not None:
+                        region, logical_screen = picked
+                        source_feed.set_region(region)
                         inference.control(ord("r"))
                         inference.manual_locked = True
                         print(
                             f"Nueva zona seleccionada: --screen-region "
-                            f"{new_region[0]},{new_region[1]},{new_region[2]},{new_region[3]}"
+                            f"{region[0]},{region[1]},{region[2]},{region[3]}"
                         )
                     cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow(assistant_win, 936, 640)
+                    win_w, win_h = compact_size if compact_mode else wide_size
+                    wx, wy = compute_assistant_window_pos(region, logical_screen, (win_w, win_h))
+                    cv2.resizeWindow(assistant_win, win_w, win_h)
+                    cv2.moveWindow(assistant_win, wx, wy)
                     continue
                 if key == ord("s") and board_vis is not None:
                     snap_dir = PROJECT_ROOT / "data" / "snapshots"

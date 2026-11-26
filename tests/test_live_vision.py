@@ -276,6 +276,15 @@ def test_corners_to_logical_region_scales_retina_coordinates():
     assert live.corners_to_logical_region(corners, screen_scale=1.0) == (400, 200, 1200, 1200)
 
 
+def test_compute_assistant_window_pos_avoids_overlapping_board():
+    # Board on left half of a 1512x982 MacBook -> assistant placed to the right of board.
+    wx, wy = live.compute_assistant_window_pos((120, 100, 650, 650), (1512, 982), (390, 760))
+    assert wx >= 120 + 650
+    # Board on right half -> assistant placed to the left of board.
+    wx_left, _ = live.compute_assistant_window_pos((800, 100, 650, 650), (1512, 982), (390, 760))
+    assert wx_left + 390 <= 800
+
+
 def test_full_frame_is_board_mode_uses_entire_cropped_capture():
     crop = np.full((500, 500, 3), 120, dtype=np.uint8)
     camera = SimpleNamespace(sample=lambda: (crop.copy(), 1, live.perf_counter()))

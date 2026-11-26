@@ -6,6 +6,14 @@ Pipeline de Big Data, Deep Learning y Visión por Computadora sobre datos oficia
 cámara / pantalla / foto ──▶ rectificación (OpenCV) ──▶ piezas (YOLO-seg) ──▶ FEN ──▶ mejor jugada (UCI)
 ```
 
+> **Inicio rápido (probar el proyecto sin volver a entrenar):**
+> ```bash
+> uv sync
+> git lfs pull
+> uv run python scripts/live_chess_fen.py --source screen
+> ```
+> Abre una partida en **Chess.com** o **Lichess** en un lado de tu pantalla y ejecuta el comando: detecta el tablero en automático (sin clics ni recuadros manuales), muestra cada pieza con su caja, nombre y porcentaje de confianza, y sugiere la mejor siguiente jugada comparando los 5 modelos entrenados. Para más modos (webcam, foto única, tablero físico y controles con teclado), consulta la sección [5.2 Visión en vivo](#52-visión-en-vivo-cámara--pantalla--tablero--fen--jugada).
+
 ## Contenido
 
 - [1. Descripción general](#1-descripción-general)

@@ -202,3 +202,146 @@ def test_draw_ar_overlay_projects_arrows_badges_and_hud():
     )
 
     assert frame.sum() > 0
+
+
+def test_parse_camera_source_handles_indices_and_stream_urls():
+    assert live.parse_camera_source("0") == 0
+    assert live.parse_camera_source(" 1 ") == 1
+    assert live.parse_camera_source(2) == 2
+    assert live.parse_camera_source("http://192.168.1.25:8080/video") == "http://192.168.1.25:8080/video"
+    assert live.parse_camera_source("rtsp://phone/live") == "rtsp://phone/live"
+
+
+def test_parse_region_validates_four_positive_dimensions():
+    assert live.parse_region("10, 20, 800, 800") == {
+        "left": 10,
+        "top": 20,
+        "width": 800,
+        "height": 800,
+    }
+    with pytest.raises(ValueError, match="four"):
+        live.parse_region("10,20,800")
+    with pytest.raises(ValueError, match="positive"):
+        live.parse_region("10,20,0,800")
+
+
+def test_screen_board_warps_board_before_yolo_and_maps_2d():
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    camera = SimpleNamespace(sample=lambda: (frame.copy(), 1, live.perf_counter()))
+    args = SimpleNamespace(
+        size=800,
+        turn="w",
+        flip=False,
+        stable_frames=1,
+        redetect_every=0,
+        confidence=0.25,
+        imgsz=640,
+        scene="auto",
+        castling="-",
+        en_passant="-",
+        screen_board=True,
+        screen_capture=False,
+        region_is_board=False,
+        hold_missing=3,
+        smooth=0.8,
+    )
+    seen = []
+
+    def detect(image, *args):
+        seen.append(image.shape)
+        worker._stop.set()
+        return [PieceDetection("white_pawn", 0.92, (10, 10, 90, 90))]
+
+    worker = live.LiveInference(
+        camera, SimpleNamespace(detect=detect), None, None, args
+    )
+    worker.corners = np.array([[200, 100], [600, 100], [600, 500], [200, 500]], dtype=np.float32)
+    worker._run()
+    assert seen == [(800, 800, 3)]
+    assert worker.fen.split()[0].split("/")[0] == "P7"
+
+
+def test_screen_capture_region_locks_non_green_board_to_frame(monkeypatch):
+    frame = np.full((600, 600, 3), 100, dtype=np.uint8)
+    camera = SimpleNamespace(sample=lambda: (frame.copy(), 1, live.perf_counter()))
+    args = SimpleNamespace(
+        size=800,
+        turn="w",
+        flip=False,
+        stable_frames=1,
+        redetect_every=0,
+        confidence=0.25,
+        imgsz=640,
+        scene="auto",
+        castling="-",
+        en_passant="-",
+        screen_board=True,
+        screen_capture=True,
+        region_is_board=True,
+        hold_missing=0,
+        smooth=0.0,
+    )
+    monkeypatch.setattr(live, "detect_green_screen_board", lambda img: None)
+    seen = []
+
+    def detect(image, *args):
+        seen.append(image.shape)
+        worker._stop.set()
+        return [PieceDetection("black_king", 0.95, (410, 10, 490, 90))]
+
+    worker = live.LiveInference(
+        camera, SimpleNamespace(detect=detect), None, None, args
+    )
+    worker._run()
+    assert worker.corners is not None
+    np.testing.assert_array_equal(worker.corners, [[0, 0], [599, 0], [599, 599], [0, 599]])
+    assert seen == [(800, 800, 3)]
+    assert worker.fen.split()[0].split("/")[0] == "4k3"
+
+
+def test_macos_screen_capture_access_returns_none_off_darwin(monkeypatch):
+    monkeypatch.setattr(live.sys, "platform", "linux")
+    assert live._macos_screen_capture_access() is None
+
+
+def test_live_inference_cleans_impossible_castling_and_repairs_duplicate_king():
+    frame = np.zeros((800, 800, 3), dtype=np.uint8)
+    camera = SimpleNamespace(sample=lambda: (frame.copy(), 1, live.perf_counter()))
+    args = SimpleNamespace(
+        size=800,
+        turn="w",
+        flip=False,
+        stable_frames=1,
+        redetect_every=0,
+        confidence=0.25,
+        imgsz=640,
+        scene="2d",
+        castling="KQkq",
+        en_passant="-",
+        screen_board=True,
+        screen_capture=True,
+        region_is_board=True,
+        hold_missing=0,
+        smooth=0.0,
+    )
+    policies = [live.PolicyStyle("Maia-SF", (235, 80, 235), FakePolicy(0.65))]
+
+    def detect(image, *args):
+        worker._stop.set()
+        # Kings moved from e1/e8 (e.g. castled to g1/g8) and white queen mislabelled as a second white king.
+        return [
+            PieceDetection("white-king", 0.95, (610, 710, 690, 790)),   # g1
+            PieceDetection("white-king", 0.60, (310, 710, 390, 790)),   # d1 -> demoted to Q
+            PieceDetection("black-king", 0.96, (610, 10, 690, 90)),     # g8
+        ]
+
+    worker = live.LiveInference(
+        camera, SimpleNamespace(detect=detect), None, policies, args
+    )
+    worker.corners = live.board_destination(800)
+    worker._run()
+
+    assert worker.fen.split()[2] == "-"  # impossible KQkq stripped
+    assert "Q" in worker.fen.split()[0]  # extra king repaired to queen
+    assert len(worker.results) == 1
+    assert worker.results[0]["label"] == "Maia-SF"

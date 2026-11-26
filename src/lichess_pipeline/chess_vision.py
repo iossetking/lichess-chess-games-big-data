@@ -111,39 +111,76 @@ def detect_board_corners(frame: np.ndarray) -> np.ndarray | None:
 def detect_green_screen_board(frame: np.ndarray) -> np.ndarray | None:
     """Find the green/cream 2D board by its green square regions, quickly.
 
-    The convex hull of green squares reaches all four outer corners of the
-    alternating grid. This path is intended for the supplied screen template.
+    Clusters green chessboard squares, fits the board perimeter, and verifies
+    the alternating 8x8 pattern using square corners so pieces in square
+    centres and bright screen backlights do not break detection.
     """
     import cv2
 
     height, width = frame.shape[:2]
-    scale = min(1.0, 480 / max(height, width))
+    scale = min(1.0, 640 / max(height, width))
     small = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    green = cv2.inRange(hsv, (32, 35, 30), (95, 255, 240))
+    # Exclude low-saturation cream squares (S~30) while keeping backlit screens (V up to 255).
+    green = cv2.inRange(hsv, (34, 40, 25), (98, 255, 255))
+    frame_area = small.shape[0] * small.shape[1]
     contours, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    eligible = [contour for contour in contours if cv2.contourArea(contour) > small.shape[0] * small.shape[1] * 0.001]
-    if not eligible or sum(cv2.contourArea(contour) for contour in eligible) < small.shape[0] * small.shape[1] * 0.08:
+    eligible = [contour for contour in contours if cv2.contourArea(contour) > frame_area * 0.0003]
+    if not eligible:
         return None
-    hull = cv2.convexHull(np.concatenate(eligible))
+
+    median_area = float(np.median([cv2.contourArea(contour) for contour in eligible]))
+    side = max(3, round(float(np.sqrt(median_area))))
+    ksize = max(5, min(31, int(side * 0.6) | 1))
+    dilated = cv2.dilate(green, np.ones((ksize, ksize), np.uint8), iterations=1)
+    num_labels, labels, _, _ = cv2.connectedComponentsWithStats(dilated)
+    if num_labels <= 1:
+        return None
+    counts = np.bincount(labels[green > 0], minlength=num_labels)
+    counts[0] = 0
+    best_label = int(np.argmax(counts))
+    if counts[best_label] == 0:
+        return None
+
+    cluster_mask = np.where(labels == best_label, np.uint8(255), np.uint8(0))
+    green_cluster = cv2.bitwise_and(green, cluster_mask)
+    if cv2.countNonZero(green_cluster) < frame_area * 0.015:
+        return None
+
+    cluster_contours, _ = cv2.findContours(green_cluster, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cluster_contours:
+        return None
+    hull = cv2.convexHull(np.concatenate(cluster_contours))
     rectangle = cv2.minAreaRect(hull)
     (_, _), (rw, rh), _ = rectangle
-    if min(rw, rh) < min(small.shape[:2]) * 0.25 or max(rw, rh) / min(rw, rh) > 1.8:
+    if min(rw, rh) < min(small.shape[:2]) * 0.16 or max(rw, rh) / min(rw, rh) > 1.8:
         return None
+
     points = cv2.boxPoints(rectangle)
     sums, differences = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
     ordered = points[[np.argmin(sums), np.argmin(differences), np.argmax(sums), np.argmax(differences)]]
     if len(np.unique(ordered, axis=0)) != 4:
         return None
-    projected = cv2.warpPerspective(green, cv2.getPerspectiveTransform(
-        ordered.astype(np.float32), board_destination(320)), (320, 320))
+
+    projected = cv2.warpPerspective(
+        green_cluster,
+        cv2.getPerspectiveTransform(ordered.astype(np.float32), board_destination(320)),
+        (320, 320),
+    )
     matches = 0
-    for row in range(2, 6):
+    for row in range(8):
+        r = row * 40
         for col in range(8):
-            patch = projected[row * 40 + 16:row * 40 + 24, col * 40 + 16:col * 40 + 24]
-            is_green = np.mean(patch) > 127
+            c = col * 40
+            corners_mean = (
+                float(np.mean(projected[r + 3:r + 9, c + 3:c + 9]))
+                + float(np.mean(projected[r + 3:r + 9, c + 31:c + 37]))
+                + float(np.mean(projected[r + 31:r + 37, c + 3:c + 9]))
+                + float(np.mean(projected[r + 31:r + 37, c + 31:c + 37]))
+            ) / 4.0
+            is_green = corners_mean > 100
             matches += is_green == ((row + col) % 2 == 1)
-    if matches < 26:
+    if matches < 46:
         return None
     return (ordered / scale).astype(np.float32)
 
@@ -244,6 +281,38 @@ def detections_to_fen(
 PIECE_CLASSES = ("bishop", "king", "knight", "pawn", "queen", "rook")
 
 
+def repair_king_queen_detections(detections: Sequence[PieceDetection]) -> list[PieceDetection]:
+    """Enforce at most one king per colour by resolving king/queen swaps.
+
+    Digital and physical detectors occasionally mistake a queen for a second
+    king (or vice versa), which makes ``chess.Board.is_valid()`` reject the
+    entire FEN.  For each colour:
+
+    - If >= 2 kings are detected, keep the highest-confidence king and demote
+      the extra king(s) to queens.
+    - If 0 kings and >= 2 queens are detected, promote the lowest-confidence
+      queen to a king.
+    """
+    repaired = list(detections)
+    for king_sym, queen_sym, king_label, queen_label in (
+        ("K", "Q", "white-king", "white-queen"),
+        ("k", "q", "black-king", "black-queen"),
+    ):
+        kings = [i for i, d in enumerate(repaired) if piece_symbol_from_label(d.label) == king_sym]
+        queens = [i for i, d in enumerate(repaired) if piece_symbol_from_label(d.label) == queen_sym]
+        if len(kings) >= 2:
+            best_king = max(kings, key=lambda idx: repaired[idx].confidence)
+            for idx in kings:
+                if idx != best_king:
+                    det = repaired[idx]
+                    repaired[idx] = PieceDetection(queen_label, det.confidence, det.xyxy, det.mask)
+        elif len(kings) == 0 and len(queens) >= 2:
+            least_certain_queen = min(queens, key=lambda idx: repaired[idx].confidence)
+            det = repaired[least_certain_queen]
+            repaired[least_certain_queen] = PieceDetection(king_label, det.confidence, det.xyxy, det.mask)
+    return repaired
+
+
 def crop_piece(image: np.ndarray, xyxy: Sequence[float], size: int = 128, margin: float = 1.25) -> np.ndarray:
     """Square, margin-padded crop around a detected piece, resized to ``size``.
 
@@ -315,14 +384,28 @@ class PieceLabelSmoother:
     frames.
 
     ``decay`` multiplies old votes every frame (0.8 means the last ~5 frames
-    dominate).  Tracks unseen for ``max_missing`` frames are dropped.  Only the
-    label is smoothed; boxes are always the current frame's boxes.
+    dominate).  Tracks unseen for ``max_missing`` frames are dropped.  When
+    ``hold_missing > 0``, established tracks (seen at least ``min_hold_hits``
+    times) are carried forward for up to ``hold_missing`` missed frames to
+    prevent detection blinking.
     """
 
-    def __init__(self, decay: float = 0.8, min_iou: float = 0.3, max_missing: int = 5) -> None:
+    def __init__(
+        self,
+        decay: float = 0.8,
+        min_iou: float = 0.3,
+        max_missing: int = 5,
+        hold_missing: int = 0,
+        min_hold_hits: int = 2,
+    ) -> None:
         if not 0 < decay <= 1:
             raise ValueError("decay must be in (0, 1]")
+        if hold_missing < 0:
+            raise ValueError("hold_missing must be zero or positive")
+        if min_hold_hits < 1:
+            raise ValueError("min_hold_hits must be at least 1")
         self.decay, self.min_iou, self.max_missing = decay, min_iou, max_missing
+        self.hold_missing, self.min_hold_hits = hold_missing, min_hold_hits
         self._tracks: list[dict] = []
 
     def update(self, detections: Sequence[PieceDetection]) -> list[PieceDetection]:
@@ -348,15 +431,32 @@ class PieceLabelSmoother:
             if d in assigned:
                 track = self._tracks[assigned[d]]
             else:
-                track = {"votes": {}, "box": detection.xyxy, "missing": 0}
+                track = {"votes": {}, "box": detection.xyxy, "missing": 0, "hits": 0, "last_conf": 0.0}
                 self._tracks.append(track)
             track["box"], track["missing"] = detection.xyxy, 0
+            track["hits"] += 1
             track["votes"][detection.label] = track["votes"].get(detection.label, 0.0) + detection.confidence
             label = max(track["votes"], key=track["votes"].get)
             share = track["votes"][label] / sum(track["votes"].values())
             # Report the winning label with a confidence that reflects agreement.
             confidence = detection.confidence if label == detection.label else detection.confidence * share
+            track["last_conf"] = confidence
             smoothed.append(PieceDetection(label, confidence, detection.xyxy, detection.mask))
+
+        if self.hold_missing > 0:
+            for t, track in enumerate(self._tracks):
+                if t in used_tracks:
+                    continue
+                if not (1 <= track["missing"] <= self.hold_missing and track["hits"] >= self.min_hold_hits):
+                    continue
+                if not track["votes"]:
+                    continue
+                if any(box_iou(track["box"], det.xyxy) >= self.min_iou for det in detections):
+                    continue
+                label = max(track["votes"], key=track["votes"].get)
+                held_conf = max(0.01, track["last_conf"] * (self.decay ** track["missing"]))
+                smoothed.append(PieceDetection(label, held_conf, track["box"], None))
+
         self._tracks = [track for track in self._tracks if track["missing"] <= self.max_missing]
         return smoothed
 

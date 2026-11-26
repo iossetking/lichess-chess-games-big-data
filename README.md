@@ -387,17 +387,51 @@ uv run python scripts/live_chess_fen.py \
   --turn w --castling KQkq
 ```
 
-#### Tablero digital en pantalla de celular (`screen-chess-pieces-seg.pt`)
+#### Tablero digital en pantalla (`screen-chess-pieces-seg.pt`)
 
-Los pesos de tablero físico no generalizan a sprites 2D mostrados en un teléfono. Para ese caso usa los pesos específicos entrenados con [`scripts/train_screen_chess_yoloseg.py`](scripts/train_screen_chess_yoloseg.py):
+Los pesos de tablero físico no generalizan a sprites 2D mostrados en pantalla. Para este modo puedes capturar **directamente la pantalla de tu computadora** (sin cámara ni reflejos) o seguir apuntando una cámara a la pantalla del celular:
 
-```bash
-uv run python scripts/live_chess_fen.py \
-  --weights data/models/screen-chess-pieces-seg.pt \
-  --require-segmentation --screen-board --imgsz 416 \
-  --confidence 0.25 --camera 0 \
-  --turn w --castling KQkq
-```
+- **Opción A · Captura en vivo desde la pantalla de la computadora (recomendada):**
+  ```bash
+  # Detecta automáticamente un tablero verde/crema en el monitor principal:
+  uv run python scripts/live_chess_fen.py \
+    --weights data/models/screen-chess-pieces-seg.pt \
+    --require-segmentation --screen-capture \
+    --confidence 0.25 --turn w --castling KQkq
+
+  # O arrastra con el mouse la región exacta del tablero (funciona con cualquier color de tablero):
+  uv run python scripts/live_chess_fen.py \
+    --weights data/models/screen-chess-pieces-seg.pt \
+    --require-segmentation --screen-capture --select-region \
+    --confidence 0.25 --turn w --castling KQkq
+  ```
+  *(En macOS la primera vez te pedirá permiso de **Grabación de pantalla** para tu terminal/IDE en Ajustes del Sistema → Privacidad y seguridad. Pon la ventana del script al lado del navegador para no tapar el tablero; puedes pulsar `s` en cualquier momento para volver a seleccionar el área).*
+
+- **Opción B · Apuntando una cámara al tablero en el celular:**
+  ```bash
+  uv run python scripts/live_chess_fen.py \
+    --weights data/models/screen-chess-pieces-seg.pt \
+    --require-segmentation --screen-board \
+    --confidence 0.25 --camera 0 \
+    --turn w --castling KQkq
+  ```
+
+#### Usar la cámara del celular en cualquiera de los modelos (Mac + iPhone o Mac + Samsung)
+
+`--camera` funciona con **todos** los modelos y acepta tanto un índice numérico como una URL de video:
+
+- **Mac + iPhone (Continuity Camera) o webcam virtual (Camo / Iriun / DroidCam):**
+  ```bash
+  uv run python scripts/live_chess_fen.py --list-cameras
+  uv run python scripts/live_chess_fen.py --weights data/models/chess-pieces.pt --camera 1 --turn w --castling KQkq
+  ```
+- **Mac + Samsung / Android (sin drivers en Mac):** macOS no trae Continuity Camera para Android, pero puedes instalar *IP Webcam* o *DroidCam* en el teléfono y pasar la URL directamente:
+  ```bash
+  uv run python scripts/live_chess_fen.py \
+    --weights data/models/chess-pieces.pt \
+    --camera http://192.168.1.50:8080/video \
+    --turn w --castling KQkq
+  ```
 
 #### Modelos dibujados sobre el tablero y controles en vivo
 
@@ -411,13 +445,16 @@ Cada modelo encontrado en `data/models/` proyecta su mejor jugada con flecha est
 | Maia-3 humano | `maia3_lora_human.pt` | azul |
 | Maia-3 Stockfish | `maia3_lora_stockfish.pt` | magenta |
 
-- **Teclas en la ventana**: `t` alterna el turno, `f` rota la orientación si la cámara está del lado de negras, `r` recalibra las esquinas del tablero (en `--screen-board`), `q` o `Esc` cierra.
+- **Teclas en la ventana**: `t` alterna el turno, `f` rota la orientación si la cámara está del lado de negras, `r` recalibra las esquinas del tablero, `s` (en `--screen-capture`) vuelve a seleccionar la región de pantalla con el mouse, `q` o `Esc` cierra.
 - **Flags útiles**:
   - `--move-models` (uno o varios archivos) o `--move-model` (uno solo) para elegir qué modelos comparar; la arquitectura se detecta automáticamente desde el archivo.
   - `--turn`, `--castling`, `--en-passant`: la imagen no puede saber el turno ni los derechos de enroque/captura al paso; pásalos para que el FEN sea exacto.
   - `--board-weights`: acepta de forma opcional un YOLO-seg con clase `board`/`chessboard` como respaldo si las líneas de la cuadrícula están muy ocluidas.
-  - `--redetect-every 60`: recalibra periódicamente en modo `--screen-board` si el encuadre cambia.
-  - `--imgsz 416`: acelera la inferencia YOLO a cambio de algo menos de detalle.
+  - `--monitor` / `--region left,top,width,height`: selecciona otro monitor o pasa coordenadas fijas para `--screen-capture`.
+  - `--single-window`: muestra una sola ventana en modo cámara (en `--screen-capture` viene activado por defecto).
+  - `--hold-missing 3`: mantiene piezas ya detectadas hasta 3 frames si parpadean (`0` lo desactiva).
+  - `--redetect-every 60`: recalibra periódicamente si el encuadre cambia.
+  - `--imgsz 416`: acelera la inferencia YOLO a cambio de algo menos de detalle (por defecto `640`).
 
 > **Notas sobre pesos de visión:**
 > - Los pesos deben entrenarse con las 12 clases coloreadas (`w-pawn`/`b-king`, `white_pawn`/`black_king` o equivalentes). Un checkpoint COCO genérico (`yolo*.pt`) **no sirve**.

@@ -5,8 +5,8 @@ from lichess_pipeline.chess_vision import (
     FenStabilizer,
     PieceDetection,
     PieceLabelSmoother,
-    box_iou,
     board_destination,
+    box_iou,
     crop_piece,
     detect_green_screen_board,
     detections_to_fen,
@@ -15,6 +15,7 @@ from lichess_pipeline.chess_vision import (
     marker_centers_by_corner,
     piece_description_from_label,
     piece_symbol_from_label,
+    repair_king_queen_detections,
     square_regions,
     validate_ordered_board_corners,
 )
@@ -39,6 +40,36 @@ def test_green_screen_board_finds_grid_without_pieces():
     np.testing.assert_allclose(detect_green_screen_board(image),
                                [[0, 0], [399, 0], [399, 399], [0, 399]], atol=2)
     assert detect_green_screen_board(np.zeros_like(image)) is None
+
+
+def test_green_screen_board_handles_small_populated_board_with_distractor_and_bright_screen():
+    import cv2
+
+    frame = np.full((720, 1280, 3), (35, 35, 35), dtype=np.uint8)
+    # Green UI distractor elsewhere on screen/background.
+    cv2.rectangle(frame, (30, 30), (140, 140), (80, 180, 90), -1)
+
+    bx, by, side = 520, 160, 280  # 35 px per square (~6% of frame total)
+    sq = side // 8
+    for row in range(8):
+        for column in range(8):
+            # Bright backlit green (V=250) and cream squares.
+            colour = (218, 246, 245) if (row + column) % 2 == 0 else (120, 250, 160)
+            frame[by + row * sq:by + (row + 1) * sq, bx + column * sq:bx + (column + 1) * sq] = colour
+            # Occlude centres of ranks 1, 2, 7, 8 (and some middle squares) with dark/light pieces.
+            if row in (0, 1, 3, 4, 6, 7):
+                cx = bx + column * sq + sq // 2
+                cy = by + row * sq + sq // 2
+                piece_colour = (30, 30, 30) if row < 4 else (240, 240, 240)
+                cv2.circle(frame, (cx, cy), sq // 3, piece_colour, -1)
+
+    corners = detect_green_screen_board(frame)
+    assert corners is not None
+    np.testing.assert_allclose(
+        corners,
+        [[bx, by], [bx + side - 1, by], [bx + side - 1, by + side - 1], [bx, by + side - 1]],
+        atol=4,
+    )
 
 
 def test_piece_labels_accept_common_yolo_conventions():
@@ -164,7 +195,44 @@ def test_fuse_piece_probabilities_combines_detector_and_classifier():
     assert 0.5 < conf <= 1.0
 
 
+def test_label_smoother_holds_established_tracks_across_brief_misses():
+    smoother = PieceLabelSmoother(decay=0.8, hold_missing=2, min_hold_hits=2)
+    king_box = (10, 10, 50, 90)
+    transient_box = (200, 10, 240, 90)
+
+    # First frame: king (1 hit) + transient pawn (1 hit)
+    smoother.update([_piece("white_king", 0.9, king_box), _piece("black_pawn", 0.8, transient_box)])
+    # Second frame: king reaches 2 hits; transient pawn disappears -> should NOT be held (only 1 hit).
+    out2 = smoother.update([_piece("white_king", 0.9, king_box)])
+    assert [d.label for d in out2] == ["white_king"]
+
+    # Third and fourth frames: king missed for 1 and 2 frames -> held.
+    out3 = smoother.update([])
+    assert [d.label for d in out3] == ["white_king"]
+    out4 = smoother.update([])
+    assert [d.label for d in out4] == ["white_king"]
+
+    # Fifth frame: missed 3rd consecutive frame (> hold_missing=2) -> no longer held.
+    assert smoother.update([]) == []
+
+
 def test_crop_piece_returns_requested_square_size_even_near_borders():
     image = np.full((100, 100, 3), 128, dtype=np.uint8)
     crop = crop_piece(image, (-5, 0, 25, 40), size=160)
     assert crop.shape == (160, 160, 3)
+
+
+def test_repair_king_queen_detections_fixes_swapped_king_and_queen():
+    # Two white kings (queen misclassified as king) + zero black kings (two black queens).
+    detections = [
+        _piece("white-king", 0.90, (400, 700, 490, 790)),
+        _piece("white-king", 0.62, (300, 700, 390, 790)),
+        _piece("black-queen", 0.91, (300, 10, 390, 90)),
+        _piece("black-queen", 0.55, (400, 10, 490, 90)),
+    ]
+    repaired = repair_king_queen_detections(detections)
+    assert [d.label for d in repaired] == ["white-king", "white-queen", "black-queen", "black-king"]
+
+    # Valid counts and shape-only labels are preserved untouched.
+    valid = [_piece("white-king", 0.9), _piece("black-king", 0.9), _piece("queen", 0.8)]
+    assert repair_king_queen_detections(valid) == valid

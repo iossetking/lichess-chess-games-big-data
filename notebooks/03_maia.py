@@ -245,6 +245,8 @@ def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
 def _(mo):
     import os as _os_maia
 
+    import torch as _torch_maia
+
     def _env_int(name: str, fallback: int) -> int:
         try:
             return int(_os_maia.environ[name])
@@ -273,16 +275,16 @@ def _(mo):
     )
     max_train = mo.ui.number(
         start=1000,
-        stop=5_000_000,
+        stop=20_000_000,
         step=1000,
-        value=_clamp(_env_int("LICHESS_MAIA_MAX_TRAIN", 20000), 1000, 5_000_000),
+        value=_clamp(_env_int("LICHESS_MAIA_MAX_TRAIN", 20000), 1000, 20_000_000),
         label="Posiciones máximas por dataset",
     )
     epochs = mo.ui.slider(
         start=1,
-        stop=10,
+        stop=20,
         step=1,
-        value=_clamp(_env_int("LICHESS_MAIA_EPOCHS", 5), 1, 10),
+        value=_clamp(_env_int("LICHESS_MAIA_EPOCHS", 5), 1, 20),
         label="Épocas",
     )
     _rank_options = [2, 4, 8, 16, 32]
@@ -303,6 +305,14 @@ def _(mo):
         value=_rate_label,
         label="Tasa de aprendizaje",
     )
+    _batch_options = [128, 256, 512, 1024]
+    _default_batch = 512 if _torch_maia.cuda.is_available() else 256
+    _env_batch = _env_int("LICHESS_MAIA_BATCH_SIZE", _default_batch)
+    batch_size = mo.ui.dropdown(
+        options=_batch_options,
+        value=_env_batch if _env_batch in _batch_options else _default_batch,
+        label="Tamaño de lote (batch size)",
+    )
     stockfish_elo = mo.ui.slider(
         start=1500,
         stop=3000,
@@ -314,7 +324,7 @@ def _(mo):
     mo.vstack(
         [
             mo.md("## Parámetros del ajuste fino"),
-            mo.hstack([base_name, rank, learning_rate], justify="start"),
+            mo.hstack([base_name, rank, learning_rate, batch_size], justify="start"),
             mo.hstack([max_train, epochs], justify="start"),
             stockfish_elo,
             train_button,
@@ -322,6 +332,7 @@ def _(mo):
     )
     return (
         base_name,
+        batch_size,
         epochs,
         learning_rate,
         max_train,
@@ -334,6 +345,7 @@ def _(mo):
 @app.cell
 def _(
     base_name,
+    batch_size,
     epochs,
     evals_df,
     learning_rate,
@@ -368,6 +380,7 @@ def _(
     # any control stops here until the button is pressed again.
     settings = {
         "base_name": base_name.value,
+        "batch_size": int(batch_size.value),
         "rank": int(rank.value),
         "learning_rate": float(learning_rate.value),
         "epochs": int(epochs.value),
@@ -434,8 +447,10 @@ def _(
     )
     base_parameters = count_parameters(base_model)[1]
     base_metrics = {
-        "humano": evaluate(base_model, human_test_ds),
-        "stockfish": evaluate(base_model, stockfish_test_ds),
+        "humano": evaluate(base_model, human_test_ds, batch_size=settings["batch_size"]),
+        "stockfish": evaluate(
+            base_model, stockfish_test_ds, batch_size=settings["batch_size"]
+        ),
     }
     mo.vstack(
         [
@@ -478,6 +493,7 @@ def _(
             val_ds,
             epochs=settings["epochs"],
             lr=settings["learning_rate"],
+            batch_size=settings["batch_size"],
             weight_decay=0.01,
         )
         return model, history, count_parameters(model)[0]
@@ -494,13 +510,18 @@ def _(
     human_val_ds,
     mo,
     pl,
+    settings,
     stockfish_test_ds,
 ):
     human_model, _history, lora_parameters = finetune(human_train_ds, human_val_ds)
     human_frame = pl.DataFrame(_history)
     human_metrics = {
-        "humano": evaluate(human_model, human_test_ds),
-        "stockfish": evaluate(human_model, stockfish_test_ds),
+        "humano": evaluate(
+            human_model, human_test_ds, batch_size=settings["batch_size"]
+        ),
+        "stockfish": evaluate(
+            human_model, stockfish_test_ds, batch_size=settings["batch_size"]
+        ),
     }
     mo.vstack(
         [
@@ -523,6 +544,7 @@ def _(
     human_test_ds,
     mo,
     pl,
+    settings,
     stockfish_test_ds,
     stockfish_train_ds,
     stockfish_val_ds,
@@ -530,8 +552,12 @@ def _(
     stockfish_model, _history, _ = finetune(stockfish_train_ds, stockfish_val_ds)
     stockfish_frame = pl.DataFrame(_history)
     stockfish_metrics = {
-        "humano": evaluate(stockfish_model, human_test_ds),
-        "stockfish": evaluate(stockfish_model, stockfish_test_ds),
+        "humano": evaluate(
+            stockfish_model, human_test_ds, batch_size=settings["batch_size"]
+        ),
+        "stockfish": evaluate(
+            stockfish_model, stockfish_test_ds, batch_size=settings["batch_size"]
+        ),
     }
     mo.vstack(
         [
@@ -828,7 +854,7 @@ def _(mo):
       de jugadas.
     - **Escala.** Para usar más datos basta subir los límites del cuaderno 1 y
       el control «Posiciones máximas por dataset». Cada posición ocupa unos
-      5 KB en memoria (tablero más máscara de jugadas legales).
+      ~1.3 KB en memoria (máscaras empaquetadas en bits).
     """)
     return
 

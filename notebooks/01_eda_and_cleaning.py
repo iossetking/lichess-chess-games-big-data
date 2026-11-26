@@ -400,9 +400,9 @@ def _(
         ),
     )
     max_games = mo.ui.number(
-        value=_clamp(_env_int("LICHESS_MAX_GAMES", 3000), 200, 500_000),
+        value=_clamp(_env_int("LICHESS_MAX_GAMES", 3000), 200, 2_000_000),
         start=200,
-        stop=500_000,
+        stop=2_000_000,
         step=200,
         label="Partidas totales a leer (repartidas entre los meses)",
     )
@@ -414,14 +414,26 @@ def _(
         label="Elo mínimo (se exige a ambos jugadores)",
     )
     max_positions = mo.ui.number(
-        value=_clamp(_env_int("LICHESS_MAX_POSITIONS", 40000), 1000, 5_000_000),
+        value=_clamp(_env_int("LICHESS_MAX_POSITIONS", 40000), 1000, 20_000_000),
         start=1000,
-        stop=5_000_000,
+        stop=20_000_000,
         step=1000,
         label="Máximo de posiciones (FEN) a extraer",
     )
     keep_raw = mo.ui.checkbox(
-        value=False, label="Guardar también los .zst en data/raw (máx. 100 MB en total)"
+        value=bool(_env_int("LICHESS_KEEP_RAW", 0)),
+        label="Guardar los .pgn.zst en data/raw",
+    )
+    keep_raw_evals = mo.ui.checkbox(
+        value=bool(_env_int("LICHESS_KEEP_RAW_EVALS", 0)),
+        label="Guardar lichess_db_eval.jsonl.zst en data/raw",
+    )
+    raw_max_mb = mo.ui.number(
+        value=_clamp(_env_int("LICHESS_RAW_MAX_MB", 100), 0, 500_000),
+        start=0,
+        stop=500_000,
+        step=100,
+        label="Límite total de descarga raw en MB (0 = archivos completos)",
     )
     raw_button = mo.ui.run_button(label="Guardar los .zst seleccionados")
     mo.vstack(
@@ -433,17 +445,21 @@ def _(
             min_elo,
             max_positions,
             keep_raw,
+            keep_raw_evals,
+            raw_max_mb,
             raw_button,
         ]
     )
     return (
         keep_raw,
+        keep_raw_evals,
         max_games,
         max_positions,
         min_elo,
         month_from,
         month_to,
         raw_button,
+        raw_max_mb,
         year_from,
         year_to,
     )
@@ -630,40 +646,56 @@ def _(
     RAW_DIR,
     display_dataset_sizes,
     download_to_disk,
+    evals_url,
     games_sample_url,
     keep_raw,
+    keep_raw_evals,
     mo,
     month_label,
     months_selected,
     raw_button,
+    raw_max_mb,
 ):
     mo.stop(
-        not keep_raw.value,
-        mo.md("Los archivos `.zst` no se guardan (casilla desactivada)."),
+        not keep_raw.value and not keep_raw_evals.value,
+        mo.md("Los archivos `.zst` no se guardan (casillas desactivadas)."),
     )
     mo.stop(
-        not raw_button.value,
+        mo.running_in_notebook() and not raw_button.value,
         mo.md("Pulsa **Guardar los .zst seleccionados** para descargarlos."),
     )
-    mo.stop(
-        not months_selected,
-        mo.callout(mo.md("No hay meses seleccionados que descargar."), kind="warn"),
-    )
-    budget = max(1_000_000, 100_000_000 // len(months_selected))
-    saved_paths = []
-    _failures = []
-    with mo.status.spinner(title="Guardando prefijos de los .zst…") as _spinner:
+    _targets = []
+    if keep_raw.value:
         for _game_year, _game_month in months_selected:
             _label = month_label((_game_year, _game_month))
-            _spinner.update(subtitle=f"Descargando `{_label}`…")
-            try:
-                saved_paths.append(
-                    download_to_disk(
-                        games_sample_url(_game_year, _game_month),
-                        RAW_DIR / f"lichess_{_label}.pgn.zst",
-                        max_bytes=budget,
-                    )
+            _targets.append(
+                (
+                    _label,
+                    games_sample_url(_game_year, _game_month),
+                    RAW_DIR / f"lichess_{_label}.pgn.zst",
                 )
+            )
+    if keep_raw_evals.value:
+        _targets.append(
+            ("evals", evals_url(), RAW_DIR / "lichess_db_eval.jsonl.zst")
+        )
+    mo.stop(
+        not _targets,
+        mo.callout(mo.md("No hay archivos seleccionados que descargar."), kind="warn"),
+    )
+    _max_mb = int(raw_max_mb.value)
+    budget = (
+        None
+        if _max_mb == 0
+        else max(1_000_000, (_max_mb * 1_000_000) // len(_targets))
+    )
+    saved_paths = []
+    _failures = []
+    with mo.status.spinner(title="Descargando archivos raw .zst…") as _spinner:
+        for _label, _url, _dest in _targets:
+            _spinner.update(subtitle=f"Descargando `{_dest.name}`…")
+            try:
+                saved_paths.append(download_to_disk(_url, _dest, max_bytes=budget))
             except LichessConnectionError as exc:
                 _failures.append(f"`{_label}`: {exc}")
     message = f"Guardados **{len(saved_paths)}** archivo(s) en `{RAW_DIR}`."
@@ -876,9 +908,9 @@ def _(mo):
         return max(low, min(high, value))
 
     max_evals = mo.ui.number(
-        value=_clamp(_env_int("LICHESS_MAX_EVALS", 20000), 1000, 5_000_000),
+        value=_clamp(_env_int("LICHESS_MAX_EVALS", 20000), 1000, 20_000_000),
         start=1000,
-        stop=5_000_000,
+        stop=20_000_000,
         step=1000,
         label="Evaluaciones únicas a leer",
     )

@@ -44,6 +44,8 @@ from torch.utils.data import DataLoader, TensorDataset
 ALL_MOVES: list[str] = get_all_possible_moves()
 MOVE_TO_INDEX: dict[str, int] = {move: index for index, move in enumerate(ALL_MOVES)}
 NUM_MOVE_CLASSES = len(ALL_MOVES)  # 4352
+PACKED_MASK_BYTES = NUM_MOVE_CLASSES // 8  # 544 bytes for 4352 legal-move bits
+_UNPACK_BITS = torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], dtype=torch.uint8)
 PIECE_PLANES = 12
 
 DEFAULT_MODEL_NAME = "maia3-5m"
@@ -282,6 +284,21 @@ def legal_move_mask(fen: str) -> np.ndarray:
     return mask
 
 
+def unpack_legal_masks(masks: torch.Tensor) -> torch.Tensor:
+    """Return a ``(B, 4352)`` boolean mask from either bool or bit-packed input."""
+    if masks.shape[-1] == NUM_MOVE_CLASSES:
+        return masks.to(torch.bool)
+    if masks.shape[-1] != PACKED_MASK_BYTES:
+        raise ValueError(
+            f"Expected mask width {NUM_MOVE_CLASSES} or {PACKED_MASK_BYTES}, "
+            f"got {masks.shape[-1]}"
+        )
+    bits = _UNPACK_BITS.to(masks.device)
+    return ((masks.unsqueeze(-1) & bits) != 0).reshape(
+        masks.shape[0], NUM_MOVE_CLASSES
+    )
+
+
 def make_maia_dataset(
     df: pl.DataFrame,
     fen_col: str = "fen",
@@ -289,7 +306,7 @@ def make_maia_dataset(
     elo_col: str | None = None,
     default_elo: float = DEFAULT_ELO,
 ) -> tuple[TensorDataset, int]:
-    """Encode rows into ``(board, elo, move class, legal mask)`` tensors.
+    """Encode rows into ``(board, elo, move class, packed legal mask)`` tensors.
 
     ``elo_col`` gives a per-row rating (the human games carry ``avg_elo``);
     without it every row uses ``default_elo``, which is how the Stockfish
@@ -299,18 +316,32 @@ def make_maia_dataset(
     fens = df[fen_col].to_list()
     moves = df[move_col].to_list()
     elos = df[elo_col].to_list() if elo_col is not None else [None] * len(fens)
-    # Preallocated: the legal masks dominate memory (about 4 KB per position).
+    # Preallocated: bit-packed masks shrink per-row memory from ~4 KB to ~1.3 KB.
     boards = np.zeros((len(fens), 64, PIECE_PLANES), dtype=np.uint8)
-    masks = np.zeros((len(fens), NUM_MOVE_CLASSES), dtype=bool)
+    masks = np.zeros((len(fens), PACKED_MASK_BYTES), dtype=np.uint8)
     targets: list[int] = []
     ratings: list[float] = []
     for fen, move, elo in zip(fens, moves, elos, strict=True):
-        index = move_to_index(fen, move)
-        mask = legal_move_mask(fen)
-        if index is None or not mask[index]:
+        board = chess.Board(fen)
+        black_to_move = board.turn == chess.BLACK
+        target_uci = mirror_move(move) if black_to_move else move
+        index = MOVE_TO_INDEX.get(target_uci)
+        if index is None:
             continue
-        boards[len(targets)] = encode_fen(fen)
-        masks[len(targets)] = mask
+        row_mask = np.zeros(NUM_MOVE_CLASSES, dtype=bool)
+        for legal_move in board.legal_moves:
+            legal_uci = mirror_move(legal_move.uci()) if black_to_move else legal_move.uci()
+            legal_idx = MOVE_TO_INDEX.get(legal_uci)
+            if legal_idx is not None:
+                row_mask[legal_idx] = True
+        if not row_mask[index]:
+            continue
+        kept = len(targets)
+        canonical_board = board.mirror() if black_to_move else board
+        for square, piece in canonical_board.piece_map().items():
+            offset = 0 if piece.color == chess.WHITE else 6
+            boards[kept, square, piece.piece_type - 1 + offset] = 1
+        masks[kept] = np.packbits(row_mask)
         targets.append(index)
         ratings.append(float(elo) if elo is not None and elo > 0 else default_elo)
     kept = len(targets)
@@ -345,7 +376,7 @@ def _masked_logits(
     tokens = boards.float().repeat(1, 1, model.cfg.history)
     with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
         logits, _, _ = model(tokens, elos, elos)
-    return logits.float().masked_fill(~masks, MASK_VALUE)
+    return logits.float().masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
 
 
 def evaluate(
@@ -362,9 +393,11 @@ def evaluate(
     top1 = 0
     top3 = 0
     with torch.no_grad():
-        for boards, elos, targets, masks in DataLoader(dataset, batch_size=batch_size):
+        for boards, elos, targets, masks in DataLoader(
+            dataset, batch_size=batch_size, pin_memory=device.type == "cuda"
+        ):
             logits = _masked_logits(model, boards, elos, masks)
-            targets = targets.to(device)
+            targets = targets.to(device, non_blocking=True)
             total_loss += criterion(logits, targets).item()
             hits = logits.topk(3, dim=1).indices == targets.unsqueeze(1)
             top1 += int(hits[:, 0].sum())
@@ -424,7 +457,7 @@ def train_lora(
         running_loss = 0.0
         seen = 0
         for boards, elos, targets, masks in loader:
-            targets = targets.to(device)
+            targets = targets.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             loss = criterion(_masked_logits(model, boards, elos, masks), targets)
             scaler.scale(loss).backward()

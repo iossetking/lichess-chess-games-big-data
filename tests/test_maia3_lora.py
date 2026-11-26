@@ -9,6 +9,7 @@ import torch
 
 from lichess_pipeline.model.maia3_lora import (
     NUM_MOVE_CLASSES,
+    PACKED_MASK_BYTES,
     LoRALinear,
     apply_lora,
     build_maia3,
@@ -23,6 +24,7 @@ from lichess_pipeline.model.maia3_lora import (
     predict_top_moves,
     save_adapter,
     train_lora,
+    unpack_legal_masks,
 )
 
 TINY_CONFIG = {
@@ -158,9 +160,31 @@ def test_make_maia_dataset_drops_rows_with_illegal_targets():
 
     assert skipped == 1
     assert boards.shape == (2, 64, 12)
-    assert masks.shape == (2, NUM_MOVE_CLASSES)
+    assert masks.dtype == torch.uint8
+    assert masks.shape == (2, PACKED_MASK_BYTES)
+    unpacked = unpack_legal_masks(masks)
+    assert unpacked.dtype == torch.bool
+    for idx, fen in enumerate([chess.STARTING_FEN, AFTER_E4]):
+        assert torch.equal(unpacked[idx], torch.from_numpy(legal_move_mask(fen)))
     assert elos.tolist() == [1900.0, 2500.0]
     assert targets[0] == targets[1]  # e2e4 and the mirrored e7e5
+
+
+def test_unpack_legal_masks_accepts_packed_and_unpacked_tensors():
+    raw_mask = torch.from_numpy(legal_move_mask(chess.STARTING_FEN)).unsqueeze(0)
+    packed_mask = torch.from_numpy(
+        legal_move_mask(chess.STARTING_FEN)
+    ).unsqueeze(0)
+    import numpy as np
+
+    packed_tensor = torch.from_numpy(
+        np.packbits(legal_move_mask(chess.STARTING_FEN))
+    ).unsqueeze(0)
+
+    assert torch.equal(unpack_legal_masks(raw_mask), raw_mask)
+    assert torch.equal(unpack_legal_masks(packed_tensor), packed_mask)
+    with pytest.raises(ValueError, match="Expected mask width"):
+        unpack_legal_masks(torch.zeros((1, 10), dtype=torch.uint8))
 
 
 def test_make_maia_dataset_rejects_a_frame_without_usable_rows():

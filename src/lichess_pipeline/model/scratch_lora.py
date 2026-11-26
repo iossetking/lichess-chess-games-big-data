@@ -318,14 +318,21 @@ def train_head_lora(
 
     torch.manual_seed(seed)
     optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)
+    scaler = torch.amp.GradScaler(
+        target_device.type, enabled=target_device.type == "cuda"
+    )
     criterion = nn.CrossEntropyLoss()
+    use_pin_memory = target_device.type == "cuda"
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
         generator=torch.Generator().manual_seed(seed),
+        pin_memory=use_pin_memory,
     )
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, pin_memory=use_pin_memory
+    )
     history: list[dict[str, float]] = []
 
     best_loss = (
@@ -342,15 +349,16 @@ def train_head_lora(
         seen = 0
         for features, targets, masks in train_loader:
             features, targets, masks = (
-                features.to(target_device),
-                targets.to(target_device),
-                masks.to(target_device),
+                features.to(target_device, non_blocking=True),
+                targets.to(target_device, non_blocking=True),
+                masks.to(target_device, non_blocking=True),
             )
             optimizer.zero_grad(set_to_none=True)
             logits = _masked_logits(model, features, masks)
             loss = criterion(logits, targets)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item() * targets.size(0)
             seen += targets.size(0)
         metrics = _validation_metrics(model, val_loader, criterion, target_device)
@@ -406,8 +414,11 @@ MASK_VALUE = -1e9
 def _masked_logits(
     model: nn.Module, features: torch.Tensor, masks: torch.Tensor
 ) -> torch.Tensor:
-    logits = model(features.to(dtype=torch.float32))
-    return logits.masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
+    with torch.autocast(
+        device_type=features.device.type, enabled=features.device.type == "cuda"
+    ):
+        logits = model(features.to(dtype=torch.float32))
+    return logits.float().masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
 
 
 def _validation_metrics(
@@ -425,9 +436,9 @@ def _validation_metrics(
     with torch.no_grad():
         for features, targets, masks in loader:
             features, targets, masks = (
-                features.to(device),
-                targets.to(device),
-                masks.to(device),
+                features.to(device, non_blocking=True),
+                targets.to(device, non_blocking=True),
+                masks.to(device, non_blocking=True),
             )
             logits = _masked_logits(model, features, masks)
             total_loss += criterion(logits, targets).item() * targets.size(0)

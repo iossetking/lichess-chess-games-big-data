@@ -233,6 +233,8 @@ def _(EVALS_PATH, POSITIONS_PATH, load_evals, load_positions, mo, pl):
 def _(evals_df, mo, positions_df):
     import os as _os_params
 
+    import torch as _torch_params
+
     def _env_int(name: str, fallback: int) -> int:
         try:
             return int(_os_params.environ[name])
@@ -266,9 +268,9 @@ def _(evals_df, mo, positions_df):
     )
     epochs_stage1 = mo.ui.slider(
         start=1,
-        stop=10,
+        stop=20,
         step=1,
-        value=_clamp(_env_int("LICHESS_EPOCHS_STAGE1", 5), 1, 10),
+        value=_clamp(_env_int("LICHESS_EPOCHS_STAGE1", 5), 1, 20),
         label="Épocas etapa 1 (humanos)",
     )
     max_eval_positions = mo.ui.slider(
@@ -282,16 +284,16 @@ def _(evals_df, mo, positions_df):
     )
     epochs_stage2 = mo.ui.slider(
         start=1,
-        stop=10,
+        stop=20,
         step=1,
-        value=_clamp(_env_int("LICHESS_EPOCHS_STAGE2", 5), 1, 10),
+        value=_clamp(_env_int("LICHESS_EPOCHS_STAGE2", 5), 1, 20),
         label="Épocas ajuste de pesos (Stockfish)",
     )
     epochs_lora = mo.ui.slider(
         start=1,
-        stop=10,
+        stop=20,
         step=1,
-        value=_clamp(_env_int("LICHESS_EPOCHS_LORA", 5), 1, 10),
+        value=_clamp(_env_int("LICHESS_EPOCHS_LORA", 5), 1, 20),
         label="Épocas ajuste LoRA (Stockfish)",
     )
     _rank_options = [4, 8, 16, 32]
@@ -303,6 +305,14 @@ def _(evals_df, mo, positions_df):
             else 8
         ),
         label="Rango LoRA",
+    )
+    _batch_options = [128, 256, 512, 1024]
+    _default_batch = 512 if _torch_params.cuda.is_available() else 128
+    _env_batch = _env_int("LICHESS_BATCH_SIZE", _default_batch)
+    batch_size = mo.ui.dropdown(
+        options=_batch_options,
+        value=_env_batch if _env_batch in _batch_options else _default_batch,
+        label="Tamaño de lote (batch size)",
     )
     _fold_options = {"3 particiones": 3, "5 particiones": 5, "10 particiones": 10}
     _env_folds = _env_int("LICHESS_N_FOLDS", 5)
@@ -323,12 +333,13 @@ def _(evals_df, mo, positions_df):
             mo.md("## Parametros de Entrenamiento"),
             mo.hstack([max_human_positions, epochs_stage1], justify="start"),
             mo.hstack([max_eval_positions, epochs_stage2], justify="start"),
-            mo.hstack([epochs_lora, lora_rank], justify="start"),
+            mo.hstack([epochs_lora, lora_rank, batch_size], justify="start"),
             mo.hstack([n_folds, cv_weight, cv_lora], justify="start"),
             train_button,
         ]
     )
     return (
+        batch_size,
         cv_lora,
         cv_weight,
         epochs_lora,
@@ -505,6 +516,7 @@ def _(
 def _(
     ChessPolicyNet,
     Subset,
+    batch_size,
     compact_state_dict,
     cv_row,
     epochs_stage1,
@@ -519,6 +531,7 @@ def _(
     plt,
     train_model,
 ):
+    _batch = int(batch_size.value)
     _rows = []
     _histories = []
     scratch_fold_states = []
@@ -534,7 +547,7 @@ def _(
             _h_val_ds,
             epochs=int(epochs_stage1.value),
             lr=1e-3,
-            batch_size=128,
+            batch_size=_batch,
         )
         _histories.append(pl.DataFrame(_history))
         # Kept in memory (half precision, like the saved checkpoints) so the
@@ -545,7 +558,7 @@ def _(
                 _fold,
                 "Desde cero",
                 "Validación humana",
-                evaluate_model(_model, _h_val_ds, batch_size=128),
+                evaluate_model(_model, _h_val_ds, batch_size=_batch),
                 int(epochs_stage1.value),
             )
         )
@@ -554,7 +567,7 @@ def _(
                 _fold,
                 "Desde cero",
                 "Validación Stockfish",
-                evaluate_model(_model, _e_val_ds, batch_size=128),
+                evaluate_model(_model, _e_val_ds, batch_size=_batch),
                 int(epochs_stage1.value),
             )
         )
@@ -629,6 +642,7 @@ def _(
 def _(
     ChessPolicyNet,
     Subset,
+    batch_size,
     cv_row,
     cv_weight,
     epochs_stage2,
@@ -652,6 +666,7 @@ def _(
             kind="info",
         ),
     )
+    _batch = int(batch_size.value)
     _rows = []
     _histories = []
     for _fold, ((_e_train_idx, _e_val_idx), _fold_state) in enumerate(
@@ -666,7 +681,7 @@ def _(
             _e_val_ds,
             epochs=int(epochs_stage2.value),
             lr=1e-4,
-            batch_size=128,
+            batch_size=_batch,
         )
         _histories.append(pl.DataFrame(_history))
         _rows.append(
@@ -674,7 +689,7 @@ def _(
                 _fold,
                 "Ajuste de pesos",
                 "Validación Stockfish",
-                evaluate_model(_model, _e_val_ds, batch_size=128),
+                evaluate_model(_model, _e_val_ds, batch_size=_batch),
                 int(epochs_stage2.value),
             )
         )
@@ -746,6 +761,7 @@ def _(
     ChessPolicyNet,
     Subset,
     apply_head_lora,
+    batch_size,
     copy,
     cv_lora,
     cv_row,
@@ -772,6 +788,7 @@ def _(
             kind="info",
         ),
     )
+    _batch = int(batch_size.value)
     _rank = int(lora_rank.value)
     _rows = []
     _histories = []
@@ -790,7 +807,7 @@ def _(
             _e_val_ds,
             epochs=int(epochs_lora.value),
             lr=1e-3,
-            batch_size=128,
+            batch_size=_batch,
         )
         _histories.append(pl.DataFrame(_history))
         _rows.append(
@@ -799,7 +816,7 @@ def _(
                 "Ajuste LoRA",
                 "Validación Stockfish",
                 evaluate_model(
-                    merge_head_lora(_model), _e_val_ds, batch_size=128
+                    merge_head_lora(_model), _e_val_ds, batch_size=_batch
                 ),
                 _model.best_epoch,
             )
@@ -864,6 +881,7 @@ def _(
 @app.cell
 def _(
     ChessPolicyNet,
+    batch_size,
     epochs_stage1,
     human_dev_ds,
     human_monitor_ds,
@@ -878,7 +896,7 @@ def _(
         human_monitor_ds,
         epochs=int(epochs_stage1.value),
         lr=1e-3,
-        batch_size=128,
+        batch_size=int(batch_size.value),
     )
     stage1_frame = pl.DataFrame(stage1_history)
     mo.vstack(
@@ -904,6 +922,7 @@ def _(
 @app.cell
 def _(
     ChessPolicyNet,
+    batch_size,
     epochs_stage2,
     eval_dev_ds,
     eval_monitor_ds,
@@ -920,7 +939,7 @@ def _(
         eval_monitor_ds,
         epochs=int(epochs_stage2.value),
         lr=1e-4,
-        batch_size=128,
+        batch_size=int(batch_size.value),
     )
     stage2_frame = pl.DataFrame(stage2_history)
     mo.vstack(
@@ -937,6 +956,7 @@ def _(
 @app.cell
 def _(
     apply_head_lora,
+    batch_size,
     copy,
     count_trainable_parameters,
     epochs_lora,
@@ -960,7 +980,7 @@ def _(
         eval_monitor_ds,
         epochs=_epochs,
         lr=1e-3,
-        batch_size=128,
+        batch_size=int(batch_size.value),
         keep_best=False,
     )
     lora_ft_model = merge_head_lora(lora_model)
@@ -997,6 +1017,7 @@ def _(mo):
 
 @app.cell
 def _(
+    batch_size,
     eval_test_ds,
     evaluate_model,
     human_test_ds,
@@ -1009,10 +1030,11 @@ def _(
     scratch_model,
     weight_ft_model,
 ):
-    _scratch_human = evaluate_model(scratch_model, human_test_ds, batch_size=128)
-    _scratch_stockfish = evaluate_model(scratch_model, eval_test_ds, batch_size=128)
-    _weight_test = evaluate_model(weight_ft_model, eval_test_ds, batch_size=128)
-    _lora_test = evaluate_model(lora_ft_model, eval_test_ds, batch_size=128)
+    _batch = int(batch_size.value)
+    _scratch_human = evaluate_model(scratch_model, human_test_ds, batch_size=_batch)
+    _scratch_stockfish = evaluate_model(scratch_model, eval_test_ds, batch_size=_batch)
+    _weight_test = evaluate_model(weight_ft_model, eval_test_ds, batch_size=_batch)
+    _lora_test = evaluate_model(lora_ft_model, eval_test_ds, batch_size=_batch)
 
     test_comparison = pl.DataFrame(
         [

@@ -36,12 +36,11 @@ from lichess_pipeline.features import (
     LEGACY_NUM_PLANES,
     NUM_MOVE_CLASSES,
     NUM_PLANES,
-    canonical_move,
     encode_fen,
     encode_fen_legacy,
+    encode_position,
     index_to_move,
     legal_move_mask,
-    move_to_index,
 )
 
 MASK_VALUE = -1e9
@@ -205,9 +204,7 @@ def make_tensor_dataset(
     targets = np.empty(count, dtype=np.int64)
     masks = np.empty((count, PACKED_MASK_BYTES), dtype=np.uint8)
     for index, (fen, move) in enumerate(zip(fens, moves, strict=True)):
-        features[index] = encode_fen(fen)
-        targets[index] = move_to_index(canonical_move(fen, move))
-        masks[index] = np.packbits(legal_move_mask(fen))
+        features[index], targets[index], masks[index] = encode_position(fen, move)
     return TensorDataset(
         torch.from_numpy(features),
         torch.from_numpy(targets),
@@ -215,15 +212,22 @@ def make_tensor_dataset(
     )
 
 
-def _loader(dataset: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+def _loader(
+    dataset: Dataset, batch_size: int, shuffle: bool, pin_memory: bool = False
+) -> DataLoader:
+    return DataLoader(
+        dataset, batch_size=batch_size, shuffle=shuffle, pin_memory=pin_memory
+    )
 
 
 def _masked_logits(
     model: nn.Module, features: torch.Tensor, masks: torch.Tensor
 ) -> torch.Tensor:
-    logits = model(features.to(dtype=torch.float32))
-    return logits.masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
+    with torch.autocast(
+        device_type=features.device.type, enabled=features.device.type == "cuda"
+    ):
+        logits = model(features.to(dtype=torch.float32))
+    return logits.float().masked_fill(~unpack_legal_masks(masks), MASK_VALUE)
 
 
 def _evaluate(
@@ -237,9 +241,9 @@ def _evaluate(
     with torch.no_grad():
         for features, targets, masks in loader:
             features, targets, masks = (
-                features.to(device),
-                targets.to(device),
-                masks.to(device),
+                features.to(device, non_blocking=True),
+                targets.to(device, non_blocking=True),
+                masks.to(device, non_blocking=True),
             )
             logits = _masked_logits(model, features, masks)
             total_loss += criterion(logits, targets).item() * targets.size(0)
@@ -266,7 +270,12 @@ def evaluate_model(
     model.to(target_device)
     loss, top1, top3 = _evaluate(
         model,
-        _loader(dataset, batch_size, shuffle=False),
+        _loader(
+            dataset,
+            batch_size,
+            shuffle=False,
+            pin_memory=target_device.type == "cuda",
+        ),
         nn.CrossEntropyLoss(),
         target_device,
     )
@@ -310,9 +319,13 @@ def train_model(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(epochs, 1)
     )
+    scaler = torch.amp.GradScaler(
+        target_device.type, enabled=target_device.type == "cuda"
+    )
     criterion = nn.CrossEntropyLoss()
-    train_loader = _loader(train_ds, batch_size, shuffle=True)
-    val_loader = _loader(val_ds, batch_size, shuffle=False)
+    use_pin_memory = target_device.type == "cuda"
+    train_loader = _loader(train_ds, batch_size, shuffle=True, pin_memory=use_pin_memory)
+    val_loader = _loader(val_ds, batch_size, shuffle=False, pin_memory=use_pin_memory)
     history: list[dict[str, float]] = []
     best_loss = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
@@ -324,15 +337,16 @@ def train_model(
         seen = 0
         for features, targets, masks in train_loader:
             features, targets, masks = (
-                features.to(target_device),
-                targets.to(target_device),
-                masks.to(target_device),
+                features.to(target_device, non_blocking=True),
+                targets.to(target_device, non_blocking=True),
+                masks.to(target_device, non_blocking=True),
             )
             optimizer.zero_grad(set_to_none=True)
             logits = _masked_logits(model, features, masks)
             loss = criterion(logits, targets)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item() * targets.size(0)
             seen += targets.size(0)
         scheduler.step()

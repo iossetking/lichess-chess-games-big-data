@@ -195,3 +195,55 @@ def legal_move_mask(fen: str, *, canonical: bool = True) -> np.ndarray:
 def legal_move_indices(fen: str, *, canonical: bool = True) -> np.ndarray:
     """Sorted integer indices of the legal moves in ``fen``."""
     return np.flatnonzero(legal_move_mask(fen, canonical=canonical))
+
+
+def encode_position(fen: str, move_uci: str) -> tuple[np.ndarray, int, np.ndarray]:
+    """Encode ``(fen, move_uci)`` in a single ``chess.Board`` parse.
+
+    Returns ``(features, target_index, packed_legal_mask)`` matching
+    ``encode_fen(fen).astype(np.uint8)``,
+    ``move_to_index(canonical_move(fen, move_uci))``, and
+    ``np.packbits(legal_move_mask(fen))``.
+    """
+    board = chess.Board(fen)
+    white_to_move = board.turn == chess.WHITE
+    canonical = board if white_to_move else board.mirror()
+
+    tensor = np.zeros((NUM_PLANES, BOARD_SIZE, BOARD_SIZE), dtype=np.uint8)
+    for square, piece in canonical.piece_map().items():
+        row, column = fullmove_rating_square(square)
+        tensor[PIECE_PLANES[piece.symbol()], row, column] = 1
+    for plane, right in (
+        (CASTLING_PLANES["K"], chess.BB_H1),
+        (CASTLING_PLANES["Q"], chess.BB_A1),
+        (CASTLING_PLANES["k"], chess.BB_H8),
+        (CASTLING_PLANES["q"], chess.BB_A8),
+    ):
+        if canonical.castling_rights & right:
+            tensor[plane, :, :] = 1
+    if canonical.ep_square is not None:
+        row, column = fullmove_rating_square(canonical.ep_square)
+        tensor[EN_PASSANT_PLANE, row, column] = 1
+    if white_to_move:
+        tensor[SIDE_TO_MOVE_PLANE, :, :] = 1
+
+    move = chess.Move.from_uci(move_uci)
+    from_square, to_square = move.from_square, move.to_square
+    if not white_to_move:
+        from_square, to_square = (
+            mirror_square(from_square),
+            mirror_square(to_square),
+        )
+    target = from_square * NUM_SQUARES + to_square
+
+    mask = np.zeros(NUM_MOVE_CLASSES, dtype=bool)
+    for legal_move in board.legal_moves:
+        legal_from, legal_to = legal_move.from_square, legal_move.to_square
+        if not white_to_move:
+            legal_from, legal_to = (
+                mirror_square(legal_from),
+                mirror_square(legal_to),
+            )
+        mask[legal_from * NUM_SQUARES + legal_to] = True
+
+    return tensor, target, np.packbits(mask)

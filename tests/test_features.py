@@ -7,6 +7,7 @@ from lichess_pipeline.features import (
     canonical_move,
     encode_fen,
     encode_fen_legacy,
+    encode_position,
     index_to_move,
     legal_move_mask,
     mirror_square,
@@ -107,3 +108,24 @@ def test_legal_move_mask_mirrors_black_moves():
 def test_legal_move_mask_is_empty_on_checkmate():
     fools_mate = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"
     assert int(legal_move_mask(fools_mate).sum()) == 0
+
+
+def test_encode_position_matches_individual_helpers():
+    cases = [
+        (chess.STARTING_FEN, "e2e4"),
+        ("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1", "e7e5"),
+        ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+        ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"),
+        ("8/4P3/8/8/8/8/8/k6K w - - 0 1", "e7e8q"),
+    ]
+    for fen, move_uci in cases:
+        features, target, packed_mask = encode_position(fen, move_uci)
+        expected_features = encode_fen(fen).astype(np.uint8)
+        expected_target = move_to_index(canonical_move(fen, move_uci))
+        expected_mask = np.packbits(legal_move_mask(fen))
+
+        assert features.dtype == np.uint8
+        assert np.array_equal(features, expected_features)
+        assert target == expected_target
+        assert packed_mask.dtype == np.uint8
+        assert np.array_equal(packed_mask, expected_mask)

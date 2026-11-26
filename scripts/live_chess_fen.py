@@ -1165,23 +1165,23 @@ def draw_board_analysis(
         cv2.putText(board_vis, files[idx], (idx * side + side - 15, board_size - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (30, 30, 30), 2, cv2.LINE_AA)
         cv2.putText(board_vis, files[idx], (idx * side + side - 15, board_size - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (245, 245, 245), 1, cv2.LINE_AA)
 
-    # 3. Mask contours + compact colour-coded piece labels.
+    # 3. Bounding box + mask contour + readable Spanish piece name & percentage on every piece.
     for det in detections:
         sym = piece_symbol_from_label(det.label)
         is_white = sym is not None and sym.isupper()
         colour = (255, 230, 90) if is_white else (50, 130, 255)
+        x1, y1, x2, y2 = (max(0, min(board_size - 1, round(v))) for v in det.xyxy)
         if show_masks and det.mask is not None and len(det.mask) >= 3:
-            cv2.polylines(board_vis, [det.mask.reshape(-1, 1, 2)], True, colour, 2, cv2.LINE_AA)
-        else:
-            x1, y1, x2, y2 = (round(v) for v in det.xyxy)
-            cv2.rectangle(board_vis, (x1, y1), (x2, y2), colour, 2)
-        tag = f"{sym or det.label[:2]} {det.confidence:.0%}"
-        x1, y1 = int(round(det.xyxy[0])), int(round(det.xyxy[1]))
-        (tw, th), bl = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+            cv2.polylines(board_vis, [det.mask.reshape(-1, 1, 2)], True, colour, 1, cv2.LINE_AA)
+        cv2.rectangle(board_vis, (x1, y1), (x2, y2), colour, 2)
+        desc = piece_description_from_label(det.label) or det.label
+        desc = desc.removesuffix(" blanco").removesuffix(" negro").replace("ó", "o")
+        tag = f"{desc} {det.confidence:.0%}"
+        (tw, th), bl = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
         lx = max(2, min(x1, board_size - tw - 6))
         ly = max(th + 5, min(y1 + th + 3, board_size - bl - 2))
-        cv2.rectangle(board_vis, (lx - 2, ly - th - 3), (lx + tw + 3, ly + bl), colour, -1)
-        cv2.putText(board_vis, tag, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (15, 15, 15), 1, cv2.LINE_AA)
+        cv2.rectangle(board_vis, (lx - 2, ly - th - 4), (lx + tw + 3, ly + bl), colour, -1)
+        cv2.putText(board_vis, tag, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (10, 10, 10), 1, cv2.LINE_AA)
 
     # 4. Move arrows projected directly on the rectified board.
     if visible_results:
@@ -1637,8 +1637,8 @@ def main() -> int:
 
         # Compact vertical layout by default so it fits beside Chess.com/Lichess without covering the board!
         compact_mode = True
-        compact_size = (360, 760)
-        wide_size = (900, 615)
+        compact_size = (440, 820)
+        wide_size = (960, 655)
 
         assistant_win = "Chess Assistant | 5 Modelos"
         cv2.namedWindow(assistant_win, cv2.WINDOW_NORMAL)
@@ -1658,13 +1658,16 @@ def main() -> int:
                 board_vis = snap["board_image"]
                 if board_vis is not None:
                     if compact_mode and board_vis.shape[1] == args.size + 370:
-                        # Stack miniature rectified board (370x370) above the 370px telemetry sidebar + hotkey bar.
-                        board_part = cv2.resize(board_vis[:, :args.size], (370, 370), interpolation=cv2.INTER_AREA)
-                        panel_part = board_vis[:500, args.size:].copy()
-                        footer = np.full((42, 370, 3), (22, 24, 28), dtype=np.uint8)
-                        cv2.line(footer, (12, 2), (358, 2), (70, 75, 85), 1)
-                        cv2.putText(footer, "[c] Zona [v] Vista [t] Turno [f] Girar", (12, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.41, (185, 195, 210), 1, cv2.LINE_AA)
-                        cv2.putText(footer, "[0/1-5] Modelos [m] Mascaras [q] Salir", (12, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.41, (185, 195, 210), 1, cv2.LINE_AA)
+                        # Stack clear rectified board (480x480) above the telemetry sidebar + hotkey bar.
+                        col_w = 480
+                        board_part = cv2.resize(board_vis[:, :args.size], (col_w, col_w), interpolation=cv2.INTER_AREA)
+                        panel_crop = board_vis[:500, args.size:]
+                        panel_h = int(round(panel_crop.shape[0] * (col_w / panel_crop.shape[1])))
+                        panel_part = cv2.resize(panel_crop, (col_w, panel_h), interpolation=cv2.INTER_AREA)
+                        footer = np.full((46, col_w, 3), (22, 24, 28), dtype=np.uint8)
+                        cv2.line(footer, (12, 2), (col_w - 12, 2), (70, 75, 85), 1)
+                        cv2.putText(footer, "[c] Zona   [v] Vista   [t] Turno   [f] Girar", (14, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (185, 195, 210), 1, cv2.LINE_AA)
+                        cv2.putText(footer, "[0/1-5] Modelos   [m] Mascaras   [q] Salir", (14, 39), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (185, 195, 210), 1, cv2.LINE_AA)
                         display_img = np.vstack([board_part, panel_part, footer])
                     else:
                         display_img = board_vis

@@ -362,39 +362,44 @@ uv run marimo edit notebooks/03_maia.py
 
 ### 5.2 Visión en vivo (cámara / pantalla → tablero → FEN → jugada)
 
-La ruta de producción es [`scripts/live_chess_fen.py`](scripts/live_chess_fen.py). Detecta automáticamente el tablero (en verde Chess.com, café Lichess, azul, madera, etc., o con calibración manual de 4 esquinas pulsando `c`), rectifica la perspectiva a `800×800`, segmenta las 12 clases de piezas con **YOLO-seg**, valida el **FEN** y proyecta las flechas de los 5 modelos de jugadas presentes en `data/models/`.
+El script principal para probar visión + predicción de jugadas al mismo tiempo es [`scripts/live_chess_fen.py`](scripts/live_chess_fen.py). Si ya clonaste el repo y bajaste los pesos con `uv sync` y `git lfs pull`, no necesitas volver a entrenar nada: el script carga solos el modelo de visión (`data/models/screen-chess-pieces-seg.pt`) y los 5 modelos de jugadas entrenados en `data/models/`.
 
-#### Tablero digital en pantalla (comando rápido · por defecto)
+Sobre cada pieza detectada dibuja una **caja con el nombre en español y el porcentaje de confianza** (`peon 97%`, `caballo 97%`, `dama 98%`, etc.; en **cian** las blancas y en **naranja** las negras), opcionalmente su máscara de segmentación, y encima proyecta las flechas con la mejor siguiente jugada según los 5 modelos.
 
-Carga automáticamente `data/models/screen-chess-pieces-seg.pt` (`yolo11s-seg` entrenado en Chess.com Neo + Lichess cburnett y 8 temas de tablero) y los 5 modelos de jugadas:
+#### Cómo correrlo (comandos listos para usar)
 
 ```bash
-# 1. Captura directa de tu propia pantalla (sin webcam; ideal para Chess.com / Lichess en el navegador)
+# 1. Captura directa de tu pantalla (sin webcam, ideal para jugar en Chess.com o Lichess)
 uv run python scripts/live_chess_fen.py --source screen
 
-# 2. Webcam apuntando a un celular o monitor
+# 2. Webcam apuntando a un celular o a otro monitor
 uv run python scripts/live_chess_fen.py
 
-# 3. Analizar una sola captura de pantalla o foto (muestra tablero + máscaras + jugadas de los 5 modelos)
+# 3. Probar con una sola captura de pantalla o foto
 uv run python scripts/live_chess_fen.py --image ruta/a/captura.png
-```
 
-**Cómo usar `--source screen` en 3 pasos (sin webcam):**
-1. Abre tu partida de **Chess.com** o **Lichess** en un lado de la pantalla (p. ej. mitad izquierda) y ejecuta `uv run python scripts/live_chess_fen.py --source screen`.
-2. Se abrirá una captura ajustada de tu pantalla: si el tablero aparece ya rodeado en **verde**, pulsa **Enter**; si no, **arrastra un rectángulo** con el mouse desde la esquina superior izquierda hasta la inferior derecha del tablero y pulsa **Enter** *(pulsa `r` para refrescar la captura si necesitas cambiar de ventana)*.
-3. El selector se cierra y queda **una sola ventana compacta** (`Chess Assistant`) que puedes acomodar al lado de tu navegador sin tapar el tablero. Si mueves el navegador, pulsa `c` para volver a seleccionar la zona del tablero. *(En macOS, otorga permiso de «Grabación de pantalla» a tu terminal en Ajustes del Sistema → Privacidad y seguridad si la captura sale vacía.)*
-
-#### Tablero físico 3D con webcam (`chess-pieces.pt`)
-
-```bash
+# 4. Tablero físico 3D con webcam (usa chess-pieces.pt)
 uv run python scripts/live_chess_fen.py --mode physical
 ```
 
-*(Si prefieres pesos de segmentación físicos: `--mode physical --weights data/models/chess-pieces-seg.pt --require-segmentation`.)*
+*(Para tablero físico con segmentación: `uv run python scripts/live_chess_fen.py --mode physical --weights data/models/chess-pieces-seg.pt --require-segmentation`.)*
 
-#### Modelos dibujados sobre el tablero y controles en vivo
+#### Guía rápida para captura directa en pantalla (`--source screen`)
 
-Cada modelo encontrado en `data/models/` proyecta su mejor jugada con flecha estilo SeeMate (trayectoria en L para caballos y etiqueta con notación algebraica y probabilidad), además de un panel lateral con el consenso entre los 5 modelos y las 3 mejores opciones de cada uno:
+1. Abre tu partida de **Chess.com** o **Lichess** en un lado de tu pantalla (por ejemplo, en la mitad izquierda) y corre en tu terminal:
+   ```bash
+   uv run python scripts/live_chess_fen.py --source screen
+   ```
+2. Se abre una captura de tu pantalla para ubicar el tablero:
+   - Si el tablero ya aparece encerrado en un cuadro **verde**, solo presiona **`Enter`**.
+   - Si no lo agarró solo, **arrastra un rectángulo** con el mouse cubriendo el tablero (de la esquina superior izquierda a la inferior derecha) y presiona **`Enter`**. *(Si necesitabas cambiar de ventana antes, pulsa `r` para tomar otra captura.)*
+3. El selector se cierra y se abre la ventana compacta **`Chess Assistant | 5 Modelos`** colocada automáticamente al costado libre de tu tablero (para no taparlo). Ahí vas viendo en tiempo real las cajas con porcentaje de cada pieza, el estado del FEN, el consenso de la mejor jugada y el top-3 de los 5 modelos.
+   - **Tip importante:** no arrastres la ventana del asistente encima del tablero del navegador, porque si la tapas la captura va a grabar al propio asistente. Si mueves tu navegador, pulsa **`c`** para volver a marcar el tablero.
+   - **Permiso en macOS:** si la captura sale negra o falla, dale permiso de *Grabación de pantalla* a tu terminal en *Ajustes del Sistema → Privacidad y seguridad*.
+
+#### Modelos dibujados sobre el tablero y teclas de control
+
+Cada modelo encontrado en `data/models/` dibuja su mejor jugada con flecha estilo SeeMate (en L para caballos, con notación algebraica y probabilidad) y aparece en el panel de resultados:
 
 | Modelo | Archivo en `data/models/` | Color de flecha | Tecla |
 |---|---|---|---|
@@ -404,22 +409,23 @@ Cada modelo encontrado en `data/models/` proyecta su mejor jugada con flecha est
 | Maia-3 humano | `maia3_lora_human.pt` | azul | `4` |
 | Maia-3 Stockfish | `maia3_lora_stockfish.pt` | magenta | `5` |
 
-- **Teclas en la ventana**:
-  - `c`: calibrar las 4 esquinas del tablero con clic (`a8 → h8 → h1 → a1`) si la detección automática no engancha.
-  - `r`: reiniciar y volver a detectar el tablero automáticamente.
-  - `t`: alternar el turno (blancas / negras).
-  - `f`: girar el tablero 180° si juegas con negras.
-  - `k`: ciclar derechos de enroque (`KQkq → KQ → kq → -`; los enroques imposibles se depuran automáticamente según la posición real de reyes y torres).
-  - `m`: mostrar u ocultar las máscaras de segmentación coloreadas por bando.
-  - `0` / `1`–`5`: mostrar los 5 modelos juntos (`0`) o enfocar uno solo (`1`–`5`).
-  - `s`: guardar captura anotada (`data/snapshots/`) con tablero, máscaras, FEN y jugadas.
-  - `q` o `Esc`: salir.
-- **Flags útiles**:
-  - `--source screen` y opcionalmente `--screen-region x,y,w,h` para capturar directo tu monitor.
-  - `--image <ruta>` y `--save-output <ruta>` para evaluar una captura puntual.
-  - `--move-models` (uno o varios archivos) o `--no-move-models` para elegir qué modelos comparar.
-  - `--board-weights`: acepta un YOLO-seg con clase `board`/`chessboard` como respaldo.
-  - `--imgsz 416`: acelera la inferencia YOLO si tu equipo va justo de FPS.
+- **Controles con el teclado (dentro de la ventana):**
+  - `c`: volver a seleccionar la zona del tablero (en `--source screen`) o marcar las 4 esquinas con clic `a8 → h8 → h1 → a1` (en webcam).
+  - `v`: cambiar entre vista compacta vertical y vista ancha (en `--source screen`).
+  - `r`: volver a detectar el tablero automáticamente (en webcam).
+  - `t`: cambiar de turno (blancas / negras).
+  - `f`: girar el tablero 180° si estás jugando con negras abajo.
+  - `k`: cambiar derechos de enroque (`KQkq → KQ → kq → -`; los enroques imposibles se quitan solos si ya se movió el rey o la torre).
+  - `m`: prender o apagar el relleno de máscaras de segmentación (las cajas y porcentajes se mantienen visibles).
+  - `0` o `1`–`5`: mostrar los 5 modelos al mismo tiempo (`0`) o ver solo un modelo (`1`–`5`).
+  - `s`: guardar una imagen con el análisis actual en `data/snapshots/`.
+  - `q` o `Esc`: cerrar el programa.
+- **Opciones extra de consola:**
+  - `--screen-region x,y,w,h`: salta el selector usando las coordenadas que imprime la terminal la primera vez.
+  - `--image <ruta>` y `--save-output <ruta>`: analiza una sola captura y guarda el resultado.
+  - `--move-models <archivos...>` o `--no-move-models`: elige qué modelos de jugadas cargar.
+  - `--board-weights`: YOLO-seg opcional con clase `board`/`chessboard` como respaldo.
+  - `--imgsz 416`: baja la resolución de inferencia si necesitas más FPS.
 
 > **Notas sobre pesos de visión:**
 > - Los pesos deben entrenarse con las 12 clases coloreadas (`w-pawn`/`b-king`, `white_pawn`/`black_king` o equivalentes). Un checkpoint COCO genérico (`yolo*.pt`) **no sirve**.
@@ -485,10 +491,10 @@ Estas utilidades solo localizan y rectifican el tablero (no predicen jugadas; el
 
 ### 6.3 Pipeline de visión por computadora
 
-- **Detección multi-tema y rectificación previa**: `detect_any_screen_board` combina detección por cuadrícula de color verde (muestreando las 4 esquinas de cada casilla para resistir piezas en el centro) con detección por periodicidad de bordes 8×8 válida para cualquier tema (Lichess café, Chess.com verde/azul/madera, etc.), además de calibración manual (`c`). En modo pantalla, el tablero se rectifica a `800×800` **antes** de ejecutar YOLO-seg (`screen-chess-pieces-seg.pt`, `yolo11s-seg`, 12 clases con color, mAP50 = 1.000 en test multi-estilo).
-- **Captura directa de pantalla sin retroalimentación**: `--source screen` detecta la escala Retina de macOS, abre un selector interactivo de un solo arrastre y luego captura exclusivamente la región del tablero en una sola ventana compacta (`Chess Assistant`) colocable junto al navegador.
-- **Hilos desacoplados y estabilidad**: la captura (webcam o región de pantalla) y la inferencia YOLO corren en hilos separados; el suavizado por pieza (`PieceLabelSmoother`) y la estabilización de FEN (`FenStabilizer`, 2 frames por defecto) evitan parpadeos, mientras `sanitize_fen_castling` y `validate_fen_position` depuran enroques imposibles y explican en español cualquier error de posición.
-- **Integración y proyección de jugadas**: cada posición válida consulta los 5 modelos cargados en `data/models/`, muestra el consenso (`MEJOR JUGADA (X/5)`) con el top-3 de cada modelo en el panel lateral y dibuja las flechas tanto en el tablero rectificado como proyectadas por homografía inversa sobre la imagen de cámara.
+- **Modelo de pantalla reentrenado en Colab (`screen-chess-pieces-seg.pt`)**: antes fallaba en piezas de Chess.com porque solo se había entrenado con un estilo y fondo verde plano. Se reentrenó con `yolo11s-seg` sobre 2,000 tableros sintéticos que combinan **Chess.com Neo** (extraído sin bordes verdes mediante *alpha matting* de doble fondo) y **Lichess `cburnett`**, en 8 temas de color, con casillas resaltadas de última jugada, jaque, coordenadas y degradaciones de cámara/pantalla. En el conjunto de prueba (200 tableros, 5,158 piezas) alcanzó **99.97 % de precisión**, **100 % de recall** y **1.000 de mAP50**.
+- **Rectificación antes de YOLO y detección multi-tema**: en modo pantalla primero se ubica el tablero (ya sea verde Chess.com o cualquier otro color por periodicidad de la cuadrícula 8×8 con `detect_any_screen_board`) y se rectifica a `800×800` **antes** de pasarlo a YOLO-seg. Así las piezas siempre llegan al tamaño exacto de entrenamiento, evitando confusiones por fondo o perspectiva.
+- **Captura directa de pantalla sin bucle infinito**: `--source screen` detecta la escala Retina de macOS, abre un selector de un solo arrastre, cierra la ventana de selección antes de empezar y coloca una sola ventana compacta (`Chess Assistant`) al costado libre del tablero para no tapar el navegador.
+- **Estabilidad, cajas con porcentaje e integración con los 5 modelos**: la captura y la inferencia corren en hilos separados con suavizado entre frames (`PieceLabelSmoother`) y estabilización de FEN (`FenStabilizer`). Además `sanitize_fen_castling` quita automáticamente enroques imposibles cuando se mueve rey o torre y `validate_fen_position` avisa en español si algo está mal (por ejemplo, turno invertido). En pantalla se muestran cajas con el nombre en español y confianza de cada pieza, máscaras opcionales, el consenso (`MEJOR JUGADA (X/5)`) y las flechas de los 5 modelos entrenados.
 
 ---
 
